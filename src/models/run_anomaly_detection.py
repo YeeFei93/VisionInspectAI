@@ -27,6 +27,7 @@ from src.evaluation.metrics import (
     youden_threshold,
 )
 from src.models.anomaly_detector import PatchCoreAnomalyDetector
+from src.preprocessing.segmentation import compute_foreground_mask
 from src.preprocessing.transform import get_val_transforms
 from src.visualization.heatmap import save_anomaly_heatmap
 
@@ -70,10 +71,7 @@ def main() -> None:
     transform = get_val_transforms(image_size)
 
     train_dataset = ManifestImageDataset(train_rows, PROJECT_ROOT, transform=transform)
-    test_dataset = ManifestImageDataset(test_rows, PROJECT_ROOT, transform=transform)
-
     train_loader = DataLoader(train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     detector = PatchCoreAnomalyDetector(
@@ -89,13 +87,18 @@ def main() -> None:
     detector.fit(train_loader)
     print(f"Memory bank size: {detector.memory_bank.shape[0]} patches")
 
-    print(f"Scoring {len(test_dataset)} test images...")
+    print(f"Scoring {len(test_rows)} test images (background masked out via foreground segmentation)...")
     scores, labels, anomaly_maps = [], [], []
-    for images, batch_labels in test_loader:
-        for result in detector.predict(images):
-            scores.append(result.image_score)
-            anomaly_maps.append(result.anomaly_map)
-        labels.extend(batch_labels.tolist())
+    for _, row in test_rows.iterrows():
+        image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
+        resized_image = image.resize((image_size, image_size))
+        input_tensor = transform(image).unsqueeze(0)
+        foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
+
+        result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
+        scores.append(result.image_score)
+        anomaly_maps.append(result.anomaly_map)
+        labels.append(int(row["label"]))
 
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
@@ -141,7 +144,12 @@ def main() -> None:
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
 
     # Save one example heatmap per defect type (plus "good") for a qualitative check.
-    vmin, vmax = float(scores_arr.min()), float(scores_arr.max())
+    # Colors are anchored to the same image-level threshold used for the printed
+    # Prediction below, so the heatmap's warm/cool split visually matches the
+    # reported decision. vmin/vmax use the actual per-pixel value range (not the
+    # image-level score range).
+    vmin = float(min(m.min().item() for m in anomaly_maps))
+    vmax = float(max(m.max().item() for m in anomaly_maps))
     seen_defect_types = set()
     saved_examples = []
     for idx, row in test_rows.iterrows():
@@ -156,7 +164,14 @@ def main() -> None:
         out_path = heatmaps_dir / f"{run_name}_{defect_type}_example.png"
         example_gt_mask = gt_masks[idx] if defect_type != "good" else None
         save_anomaly_heatmap(
-            image, anomaly_maps[idx], out_path, score=score, vmin=vmin, vmax=vmax, gt_mask=example_gt_mask
+            image,
+            anomaly_maps[idx],
+            out_path,
+            score=score,
+            vmin=vmin,
+            vmax=vmax,
+            gt_mask=example_gt_mask,
+            threshold=threshold,
         )
         saved_examples.append(out_path)
         print(f"[{defect_type}] Anomaly score: {score:.2f} | Prediction: {prediction} | Heatmap: {out_path}")

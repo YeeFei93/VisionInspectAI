@@ -15,7 +15,9 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import streamlit as st
+import torch
 import yaml
 from PIL import Image
 
@@ -24,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))  # allow `import src...` when run via `streamlit run`
 
 from src.models.anomaly_detector import PatchCoreAnomalyDetector  # noqa: E402
+from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
 from src.visualization.heatmap import make_overlay  # noqa: E402
 
@@ -77,19 +80,23 @@ def load_metrics(_config: dict) -> dict:
         return json.load(f)
 
 
-def classify_severity(score: float, threshold: float, score_max: float):
-    """Bucket a defective anomaly score into Low / Medium / High severity,
-    scaled by how far the score sits between the decision threshold and the
-    highest score observed during evaluation."""
-    if score < threshold:
-        return None
-    span = max(score_max - threshold, 1e-6)
-    normalized = min(max((score - threshold) / span, 0.0), 1.0)
-    if normalized < 1 / 3:
-        return "Low"
-    if normalized < 2 / 3:
-        return "Medium"
-    return "High"
+def classify_severity(anomaly_map: torch.Tensor, foreground_mask: np.ndarray, threshold: float):
+    """Bucket a defective prediction into Low / Medium / High severity based
+    on how much of the object's surface area is anomalous (not just the raw
+    score), with a short human-readable reason."""
+    anomaly_map_np = anomaly_map.detach().cpu().numpy()
+    foreground_area = int(foreground_mask.sum())
+    if foreground_area == 0:
+        return None, "No object detected in the image."
+
+    anomalous_area = int(np.logical_and(anomaly_map_np >= threshold, foreground_mask).sum())
+    fraction = anomalous_area / foreground_area
+
+    if fraction < 0.05:
+        return "Low", "Anomaly area is small and localized."
+    if fraction < 0.20:
+        return "Medium", "Anomaly covers a moderate portion of the object."
+    return "High", "Anomaly covers a large portion of the object."
 
 
 def main() -> None:
@@ -105,7 +112,6 @@ def main() -> None:
     metrics = load_metrics(config)
 
     threshold = metrics["threshold"]
-    score_max = metrics.get("score_max", threshold * 1.5)
     image_size = config["data"]["image_size"]
     transform = get_val_transforms(image_size)
 
@@ -118,35 +124,45 @@ def main() -> None:
     resized_image = original_image.resize((image_size, image_size))
     input_tensor = transform(original_image).unsqueeze(0)
 
+    foreground_mask = compute_foreground_mask(resized_image, image_size)
+    foreground_mask_tensor = torch.from_numpy(foreground_mask).unsqueeze(0)
+
     with st.spinner("Running anomaly detection..."):
-        result = detector.predict(input_tensor)[0]
+        result = detector.predict(input_tensor, foreground_masks=foreground_mask_tensor)[0]
 
     score = result.image_score
     prediction = "Defective" if score >= threshold else "Normal"
-    severity = classify_severity(score, threshold, score_max)
+    severity, severity_reason = classify_severity(result.anomaly_map, foreground_mask, threshold)
 
-    _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map)
+    _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map, threshold=threshold)
 
     image_col, heatmap_col, overlay_col = st.columns(3)
     image_col.image(resized_image, caption="Original", use_container_width=True)
-    heatmap_col.image(heatmap_rgb, caption="Anomaly heatmap", use_container_width=True)
+    heatmap_col.image(
+        heatmap_rgb,
+        caption="Anomaly heatmap (red = above decision threshold)",
+        use_container_width=True,
+    )
     overlay_col.image(overlay, caption="Overlay (likely defect region in red)", use_container_width=True)
 
     st.subheader("Result")
     prediction_col, score_col, severity_col = st.columns(3)
     prediction_col.metric("Prediction", prediction)
-    score_col.metric("Anomaly score", f"{score:.2f}")
+    score_col.metric("Anomaly score", f"{score:.2f}", delta=f"threshold {threshold:.2f}", delta_color="off")
     severity_col.metric("Severity", severity or "—")
 
     if prediction == "Defective":
         st.error(
             f"Prediction: {prediction}\n\n"
-            f"Anomaly score: {score:.2f}\n\n"
-            f"Severity: {severity}\n\n"
+            f"Anomaly score: {score:.2f} (decision threshold: {threshold:.2f})\n\n"
+            f"Severity: {severity} — {severity_reason}\n\n"
             "Likely defect region: highlighted in red"
         )
     else:
-        st.success(f"Prediction: {prediction}\n\nAnomaly score: {score:.2f}")
+        st.success(
+            f"Prediction: {prediction}\n\n"
+            f"Anomaly score: {score:.2f} (decision threshold: {threshold:.2f})"
+        )
 
 
 if __name__ == "__main__":

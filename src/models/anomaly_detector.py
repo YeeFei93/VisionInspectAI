@@ -153,8 +153,18 @@ class PatchCoreAnomalyDetector:
         )
 
     @torch.no_grad()
-    def predict(self, images: torch.Tensor) -> List[AnomalyResult]:
-        """images: (B, 3, H, W) -> one AnomalyResult per image."""
+    def predict(
+        self, images: torch.Tensor, foreground_masks: Optional[torch.Tensor] = None
+    ) -> List[AnomalyResult]:
+        """images: (B, 3, H, W) -> one AnomalyResult per image.
+
+        `foreground_masks`, if given, is a (B, H, W) boolean/float tensor at
+        the same resolution as `images` (True/1 = object, False/0 =
+        background). Background patches are pinned to the minimum
+        foreground distance so they read as "normal" in both the image
+        score and the heatmap — this keeps the anomaly score and heatmap
+        focused on the actual part instead of the plain background.
+        """
         if self.memory_bank is None:
             raise RuntimeError("Call fit() before predict().")
 
@@ -163,11 +173,28 @@ class PatchCoreAnomalyDetector:
         b, c, h, w = feature_map.shape
         patches = feature_map.permute(0, 2, 3, 1).reshape(b, h * w, c).cpu()
 
+        patch_masks = None
+        if foreground_masks is not None:
+            # Downsample the full-resolution foreground mask to the patch grid.
+            patch_masks = (
+                F.adaptive_max_pool2d(foreground_masks.float().unsqueeze(1), output_size=(h, w))
+                .squeeze(1)
+                .reshape(b, h * w)
+                > 0
+            )
+
         results = []
         for i in range(b):
             dists = torch.cdist(patches[i], self.memory_bank)  # (h*w, bank_size)
             nn_dists, _ = dists.min(dim=1)  # nearest-neighbor distance per patch
-            image_score = nn_dists.max().item()
+
+            if patch_masks is not None and patch_masks[i].any():
+                mask_i = patch_masks[i]
+                background_fill = nn_dists[mask_i].min()
+                nn_dists = torch.where(mask_i, nn_dists, background_fill)
+                image_score = nn_dists[mask_i].max().item()
+            else:
+                image_score = nn_dists.max().item()
 
             anomaly_map = nn_dists.reshape(1, 1, h, w)
             anomaly_map = F.interpolate(
