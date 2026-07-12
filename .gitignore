@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-1/
+venv/
+.env
+
+# Data (raw MVTec-AD dataset is not tracked; small generated manifests are)
+/data/*
+!/data/manifests/
+!/data/manifests/**
+*.zip
+*.tar.xz
+*.tar.gz
+
+# Model artifacts
+models/checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Outputs
+outputs/
+runs/
+mlruns/
+
+# System
+.DS_Store
