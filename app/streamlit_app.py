@@ -4,7 +4,8 @@ Run:
     streamlit run app/streamlit_app.py
 
 Flow:
-    Pick a category, upload an image
+    Upload an image
+      -> Object/category auto-detected (screw / bottle / hazelnut / ...)
       -> Prediction: Normal / Defective
       -> Anomaly score
       -> Heatmap overlay (likely defect region highlighted in red)
@@ -18,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 import torch
+import torch.nn.functional as F
 import yaml
 from PIL import Image
 
@@ -26,18 +28,54 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))  # allow `import src...` when run via `streamlit run`
 
 from src.models.anomaly_detector import PatchCoreAnomalyDetector  # noqa: E402
+from src.models.baseline_classifier import build_baseline_model  # noqa: E402
 from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
 from src.visualization.heatmap import make_overlay  # noqa: E402
 
 # Category -> its primary config file. Add an entry here after running
 # create_manifest.py + train_baseline.py + run_anomaly_detection.py for a
-# new MVTec-AD category.
+# new MVTec-AD category, and retrain the category classifier
+# (src/models/train_category_classifier.py) so it can recognize it too.
 CATEGORY_CONFIGS = {
     "screw": PROJECT_ROOT / "config" / "screw_config.yaml",
     "bottle": PROJECT_ROOT / "config" / "bottle_config.yaml",
     "hazelnut": PROJECT_ROOT / "config" / "hazelnut_config.yaml",
 }
+
+CATEGORY_CLASSIFIER_CHECKPOINT = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
+CATEGORY_CLASSIFIER_METRICS = PROJECT_ROOT / "outputs" / "metrics" / "category_classifier_metrics.json"
+CATEGORY_CLASSIFIER_IMAGE_SIZE = 224
+
+
+@st.cache_resource
+def load_category_classifier():
+    """Load the "which object is this?" classifier (see
+    src/models/train_category_classifier.py), used to auto-detect the
+    category so the user doesn't have to pick one manually."""
+    if not CATEGORY_CLASSIFIER_CHECKPOINT.exists() or not CATEGORY_CLASSIFIER_METRICS.exists():
+        st.error(
+            "No category classifier found. Run "
+            "`python -m src.models.train_category_classifier` first."
+        )
+        st.stop()
+
+    with CATEGORY_CLASSIFIER_METRICS.open() as f:
+        categories = json.load(f)["categories"]
+
+    model = build_baseline_model(architecture="resnet18", num_classes=len(categories), pretrained=False)
+    model.load_state_dict(torch.load(CATEGORY_CLASSIFIER_CHECKPOINT, map_location="cpu"))
+    model.eval()
+    return model, categories
+
+
+def detect_category(model, categories, original_image: Image.Image):
+    transform = get_val_transforms(CATEGORY_CLASSIFIER_IMAGE_SIZE)
+    input_tensor = transform(original_image).unsqueeze(0)
+    with torch.no_grad():
+        probs = F.softmax(model(input_tensor), dim=1)[0]
+    pred_idx = int(probs.argmax().item())
+    return categories[pred_idx], float(probs[pred_idx].item())
 
 
 @st.cache_resource
@@ -108,11 +146,27 @@ def main() -> None:
     st.set_page_config(page_title="VisionInspectAI", layout="wide")
     st.title("VisionInspectAI — MVTec-AD Anomaly Detection")
     st.caption(
-        "Pick a category, upload an image to check whether it is normal or defective, "
-        "and see the suspected defect region."
+        "Upload an image — the object type is detected automatically, then it's checked for "
+        "defects and the suspected defect region is shown."
     )
 
-    category = st.selectbox("Category", sorted(CATEGORY_CONFIGS.keys()))
+    category_model, known_categories = load_category_classifier()
+
+    uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
+    if uploaded_file is None:
+        st.info(f"Upload a .png / .jpg image of one of: {', '.join(sorted(known_categories))}.")
+        return
+
+    original_image = Image.open(uploaded_file).convert("RGB")
+
+    detected_category, confidence = detect_category(category_model, known_categories, original_image)
+    st.write(f"**Detected category:** {detected_category} (confidence {confidence:.0%})")
+
+    with st.expander("Not correct? Override the detected category"):
+        options = sorted(known_categories)
+        category = st.selectbox("Category", options, index=options.index(detected_category))
+    if category != detected_category:
+        st.caption(f"Using manually selected category: **{category}**")
 
     config = load_config(category)
     detector = load_detector(category, config)
@@ -123,12 +177,6 @@ def main() -> None:
     use_foreground_mask = config["anomaly_detection"].get("use_foreground_mask", True)
     transform = get_val_transforms(image_size)
 
-    uploaded_file = st.file_uploader(f"Upload a {category} image", type=["png", "jpg", "jpeg"])
-    if uploaded_file is None:
-        st.info(f"Upload a .png / .jpg {category} image to run inspection.")
-        return
-
-    original_image = Image.open(uploaded_file).convert("RGB")
     resized_image = original_image.resize((image_size, image_size))
     input_tensor = transform(original_image).unsqueeze(0)
 
