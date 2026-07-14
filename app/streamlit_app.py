@@ -1,10 +1,10 @@
-"""VisionInspectAI — Streamlit demo for the screw anomaly detector.
+"""VisionInspectAI — Streamlit demo for the MVTec-AD anomaly detector.
 
 Run:
     streamlit run app/streamlit_app.py
 
 Flow:
-    Upload screw image
+    Pick a category, upload an image
       -> Prediction: Normal / Defective
       -> Anomaly score
       -> Heatmap overlay (likely defect region highlighted in red)
@@ -30,26 +30,32 @@ from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
 from src.visualization.heatmap import make_overlay  # noqa: E402
 
-CONFIG_PATH = PROJECT_ROOT / "config" / "screw_config.yaml"
+# Category -> its primary config file. Add an entry here after running
+# create_manifest.py + train_baseline.py + run_anomaly_detection.py for a
+# new MVTec-AD category.
+CATEGORY_CONFIGS = {
+    "screw": PROJECT_ROOT / "config" / "screw_config.yaml",
+    "bottle": PROJECT_ROOT / "config" / "bottle_config.yaml",
+    "hazelnut": PROJECT_ROOT / "config" / "hazelnut_config.yaml",
+}
 
 
 @st.cache_resource
-def load_config() -> dict:
-    with CONFIG_PATH.open() as f:
+def load_config(category: str) -> dict:
+    with CATEGORY_CONFIGS[category].open() as f:
         return yaml.safe_load(f)
 
 
 @st.cache_resource
-def load_detector(_config: dict) -> PatchCoreAnomalyDetector:
+def load_detector(category: str, _config: dict) -> PatchCoreAnomalyDetector:
     anomaly_cfg = _config["anomaly_detection"]
-    category = _config.get("category", "screw")
     run_name = f"patchcore_{anomaly_cfg['backbone']}_{category}"
     checkpoint_path = PROJECT_ROOT / _config["output"]["checkpoint_dir"] / f"{run_name}_memory_bank.pt"
 
     if not checkpoint_path.exists():
         st.error(
             f"No trained memory bank found at {checkpoint_path}. "
-            "Run `python -m src.models.run_anomaly_detection` first."
+            f"Run `python -m src.models.run_anomaly_detection --config config/{category}_config.yaml` first."
         )
         st.stop()
 
@@ -63,16 +69,15 @@ def load_detector(_config: dict) -> PatchCoreAnomalyDetector:
 
 
 @st.cache_resource
-def load_metrics(_config: dict) -> dict:
+def load_metrics(category: str, _config: dict) -> dict:
     anomaly_cfg = _config["anomaly_detection"]
-    category = _config.get("category", "screw")
     run_name = f"patchcore_{anomaly_cfg['backbone']}_{category}"
     metrics_path = PROJECT_ROOT / _config["output"]["metrics_dir"] / f"{run_name}_metrics.json"
 
     if not metrics_path.exists():
         st.error(
             f"No metrics file found at {metrics_path}. "
-            "Run `python -m src.models.run_anomaly_detection` first."
+            f"Run `python -m src.models.run_anomaly_detection --config config/{category}_config.yaml` first."
         )
         st.stop()
 
@@ -100,32 +105,41 @@ def classify_severity(anomaly_map: torch.Tensor, foreground_mask: np.ndarray, th
 
 
 def main() -> None:
-    st.set_page_config(page_title="VisionInspectAI — Screw Inspection", layout="wide")
-    st.title("VisionInspectAI — Screw Anomaly Detection")
+    st.set_page_config(page_title="VisionInspectAI", layout="wide")
+    st.title("VisionInspectAI — MVTec-AD Anomaly Detection")
     st.caption(
-        "Upload a screw image to check whether it is normal or defective, "
+        "Pick a category, upload an image to check whether it is normal or defective, "
         "and see the suspected defect region."
     )
 
-    config = load_config()
-    detector = load_detector(config)
-    metrics = load_metrics(config)
+    category = st.selectbox("Category", sorted(CATEGORY_CONFIGS.keys()))
+
+    config = load_config(category)
+    detector = load_detector(category, config)
+    metrics = load_metrics(category, config)
 
     threshold = metrics["threshold"]
     image_size = config["data"]["image_size"]
+    use_foreground_mask = config["anomaly_detection"].get("use_foreground_mask", True)
     transform = get_val_transforms(image_size)
 
-    uploaded_file = st.file_uploader("Upload a screw image", type=["png", "jpg", "jpeg"])
+    uploaded_file = st.file_uploader(f"Upload a {category} image", type=["png", "jpg", "jpeg"])
     if uploaded_file is None:
-        st.info("Upload a .png / .jpg screw image to run inspection.")
+        st.info(f"Upload a .png / .jpg {category} image to run inspection.")
         return
 
     original_image = Image.open(uploaded_file).convert("RGB")
     resized_image = original_image.resize((image_size, image_size))
     input_tensor = transform(original_image).unsqueeze(0)
 
-    foreground_mask = compute_foreground_mask(resized_image, image_size)
-    foreground_mask_tensor = torch.from_numpy(foreground_mask).unsqueeze(0)
+    if use_foreground_mask:
+        foreground_mask = compute_foreground_mask(resized_image, image_size)
+        foreground_mask_tensor = torch.from_numpy(foreground_mask).unsqueeze(0)
+    else:
+        # No plain background to mask out for this category (object fills the
+        # whole frame) — treat the entire image as the object of interest.
+        foreground_mask = np.ones((image_size, image_size), dtype=bool)
+        foreground_mask_tensor = None
 
     with st.spinner("Running anomaly detection..."):
         result = detector.predict(input_tensor, foreground_masks=foreground_mask_tensor)[0]

@@ -87,13 +87,18 @@ def main() -> None:
     detector.fit(train_loader)
     print(f"Memory bank size: {detector.memory_bank.shape[0]} patches")
 
-    print(f"Scoring {len(test_rows)} test images (background masked out via foreground segmentation)...")
+    use_foreground_mask = anomaly_cfg.get("use_foreground_mask", True)
+    mask_note = "background masked out via foreground segmentation" if use_foreground_mask else "foreground masking disabled"
+    print(f"Scoring {len(test_rows)} test images ({mask_note})...")
     scores, labels, anomaly_maps = [], [], []
     for _, row in test_rows.iterrows():
         image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
         resized_image = image.resize((image_size, image_size))
         input_tensor = transform(image).unsqueeze(0)
-        foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
+
+        foreground_mask = None
+        if use_foreground_mask:
+            foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
 
         result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
         scores.append(result.image_score)
