@@ -25,13 +25,14 @@ This project combines multiple pattern recognition / machine learning aspects on
 ## Project Structure
 
 - `src/data/` — manifest generation ([create_manifest.py](src/data/create_manifest.py)) and PyTorch `Dataset` ([dataset.py](src/data/dataset.py))
-- `src/preprocessing/` — image transforms
-- `src/models/` — baseline classifier, PatchCore anomaly detector, and training/evaluation scripts
+- `src/preprocessing/` — image transforms and foreground/object segmentation
+- `src/models/` — baseline classifiers, PatchCore anomaly detector, ensemble fusion, and training/evaluation scripts
 - `src/evaluation/` — classification and pixel-level localization metrics
 - `src/visualization/` — anomaly heatmap rendering
 - `notebooks/` — dataset exploration
 - `app/` — Streamlit inspection demo
 - `config/` — per-category YAML configs (e.g. `screw_config.yaml`)
+- `tests/` — unit tests for the pure evaluation/preprocessing/visualization functions
 
 ## Quick Start
 
@@ -47,6 +48,9 @@ python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 
 # 4. Launch the interactive demo
 streamlit run app/streamlit_app.py
+
+# 5. Run the unit tests
+python -m pytest tests/ -v
 ```
 
 To compare baseline classifier architectures, point `train_baseline.py` at any of `config/screw_config.yaml` (ResNet18), `config/screw_config_efficientnet_b0.yaml`, or `config/screw_config_simple_cnn.yaml` — each writes its own checkpoint/metrics file so results don't overwrite each other.
@@ -64,10 +68,41 @@ Same train/val split (112/48 images carved from `test/`), same 10 epochs, same o
 
 **Finding:** all three supervised classifiers hit the same perfect validation score, because (per the lesson below) the validation split is tiny and every defect type in it was already seen during training — accuracy/F1 can't distinguish them. The **training loss curve is the more informative signal**: the two pretrained/transfer-learning models (ResNet18, EfficientNet-B0) converge to a near-zero loss within 10 epochs, while the from-scratch Simple CNN — with ~45x fewer parameters and no ImageNet prior — is still at 0.175 and visibly still improving. This is the expected, textbook result for a ~300-image dataset: transfer learning from a pretrained backbone reaches a good fit far faster than training a CNN from scratch, which would need many more epochs (and/or more data or augmentation) to close the gap. **Recommendation:** for this dataset size, prefer a pretrained backbone (ResNet18 or the smaller/cheaper EfficientNet-B0) over a from-scratch CNN; use PatchCore (unsupervised) as the primary, more trustworthy detector since it doesn't depend on this leaky supervised validation split at all.
 
+### PatchCore backbone: ResNet18 vs WideResNet50-2
+
+Same memory bank size (2000 patches), same coreset/foreground-masking settings — only the frozen feature-extractor backbone changes (`config/screw_config_wide_resnet50_2.yaml`).
+
+| Backbone | Image ROC-AUC | Pixel ROC-AUC | Mean IoU | Mean Dice |
+|---|---|---|---|---|
+| ResNet18 | 0.909 | 0.976 | 0.047 | 0.088 |
+| WideResNet50-2 | **0.935** | **0.978** | 0.044 | 0.083 |
+
+**Finding:** the larger WideResNet50-2 backbone gives richer patch features, improving image-level ROC-AUC by ~2.6 points (0.909 → 0.935) and pixel-level ROC-AUC slightly, at the cost of a much larger download/forward pass (~264MB vs ~45MB, noticeably slower per image on CPU). Mean IoU/Dice don't improve — both backbones extract features at the same 28×28 spatial grid, so the blur from bilinear upsampling (the actual limiting factor for tight segmentation, per the lesson below) is unaffected by backbone size. **Recommendation:** use WideResNet50-2 when detection accuracy matters more than latency/footprint (e.g. batch QA review); keep ResNet18 for fast/interactive use (e.g. the Streamlit demo).
+
+## Hybrid Ensemble: Fusing the Classifier and PatchCore
+
+[src/models/run_ensemble.py](src/models/run_ensemble.py) fuses the supervised classifier's softmax "defective" probability with PatchCore's (min-max normalized) anomaly score into one weighted-average score, and evaluates classifier-only, PatchCore-only, and the fused ensemble side by side:
+
+```bash
+python -m src.models.run_ensemble --config config/screw_config.yaml --classifier-weight 0.5
+```
+
+**Important methodological note:** this is evaluated only on the classifier's held-out validation subset (48 images) — the *only* data the classifier hasn't been fit on. PatchCore, by contrast, has never seen *any* test-set image during training, so it's evaluated fairly on all 160 test images elsewhere in this README; on this smaller 48-image slice alone it scores a lower 0.884 AUROC (accuracy 0.79) than its full-test-set 0.909, simply due to the smaller/different sample.
+
+| Signal | AUROC (on the 48-image held-out subset) | Accuracy |
+|---|---|---|
+| Classifier only | 1.00 | 1.00 |
+| PatchCore only | 0.884 | 0.79 |
+| Fused ensemble (0.5 / 0.5 and 0.3 / 0.7 weights) | 1.00 | 1.00 |
+
+**Finding:** the fused ensemble ties the classifier alone rather than clearly beating it, at both a 50/50 and a 30/70 (classifier/PatchCore) weighting. This isn't a failure of the fusion code — it's the same root cause documented below: the classifier's own held-out subset is still drawn from `test/`, where every defect *type* was already seen during its training subset, so its predictions are already perfectly separable there and there's no ceiling left for the ensemble to break through. The ensemble machinery is correctly implemented and doesn't hurt anything, but demonstrating its real value would need a genuinely novel, held-out defect sample not derived from `test/` at all — which this dataset's split (`train/`=good only, `test/`=only labeled data) doesn't provide.
+
 ## Notes & Lessons Learned
 
 - **The baseline supervised classifier's near-perfect scores are misleading.** Since MVTec's `train/` only contains `good` images, a supervised good-vs-defective classifier has to be trained on a split carved out of `test/` — meaning every defect *type* it's evaluated on was already seen during training. This produced accuracy/precision/recall/F1 all at 1.0, which reflects a tiny, easy, non-independent validation split rather than real-world generalization. Treat this model as a baseline/sanity-check only.
 - **The unsupervised PatchCore detector is the more trustworthy signal.** Trained only on `train/good` (no labels at all) and evaluated on the *entire* labeled test set, it scored a more believable 0.91 image-level ROC-AUC and 0.97 pixel-level AUROC — a much fairer estimate of how the system would behave on truly unseen defects.
+- **A stronger backbone improves detection but not localization tightness.** Swapping PatchCore's frozen feature extractor from ResNet18 to WideResNet50-2 raised image ROC-AUC from 0.909 to 0.935, but mean IoU/Dice stayed roughly the same — both backbones produce patch features at the same coarse 28×28 grid, so the bilinear-upsampling blur (not backbone capacity) is the bottleneck for tight segmentation.
+- **An ensemble can't out-perform a classifier that's already at its evaluation ceiling.** Fusing the supervised classifier with PatchCore's score seemed like an obvious way to get the best of both, but on the classifier's own held-out validation subset the classifier alone already hits AUROC 1.0 (for the same reason its plain validation metrics are inflated — see above), so there's no room left for the ensemble to improve on. A fusion technique can only be shown to add value when tested on a sample that's genuinely novel to *every* component model, not just to one of them.
 - **High pixel AUROC does not imply tight defect segmentation.** Mean IoU/Dice came out low (~0.04/0.07) even though pixel AUROC was high. The anomaly map is produced on a coarse 28×28 feature grid and bilinearly upsampled to 224×224, so it's good at *ranking* defect pixels highly (localizing the general region) but blurry compared to MVTec's tight ground-truth masks. Pixel AUROC and IoU/Dice answer different questions and should be reported together, not interchangeably.
 - **`.gitignore` patterns without a leading `/` match at any depth.** An earlier `data/` rule (meant to exclude the raw MVTec dataset) was silently also excluding `src/data/`, so real source code was never staged. Always sanity-check ignore rules with `git check-ignore -v <path>` and `git status --ignored` before trusting `git add -A`.
 - **Virtual environments need explicit, exact ignore entries.** `.venv/` in `.gitignore` did not match a second environment folder named `.venv-1/`, which had all project dependencies installed — a `git add -A` would have swept hundreds of MB of installed packages into the repo if left unnoticed.
