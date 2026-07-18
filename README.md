@@ -1,6 +1,68 @@
 # VisionInspectAI
 Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, and `carpet`; the Streamlit demo auto-detects which one was uploaded.
 
+## Getting Started (New Clone Setup)
+
+These steps take a fresh clone from zero to a running Streamlit demo. **Note:** the raw MVTec-AD dataset, trained model checkpoints (`models/checkpoints/`) and generated outputs (`outputs/`) are all excluded via `.gitignore` (too large for git) — only source code and the small `data/manifests/*.csv` files are tracked, so you need to download the dataset and (re)train the models yourself after cloning.
+
+### 1. Clone and set up a Python environment
+
+```bash
+git clone <this-repo-url>
+cd VisionInspectAI
+
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+pip install -r requirement.txt
+```
+
+Requires Python 3.9+.
+
+### 2. Download the MVTec-AD dataset
+
+Download the dataset from the official [MVTec-AD page](https://www.mvtec.com/company/research/datasets/mvtec-ad) (free for research/non-commercial use — see `data/mvtec_anomaly_detection/license.txt`) and extract it so the folder layout looks like:
+
+```
+data/mvtec_anomaly_detection/
+	<category>/
+		train/good/...
+		test/<defect_type or good>/...
+		ground_truth/<defect_type>/...
+```
+
+At minimum, grab the categories this project is already configured for: `screw`, `bottle`, `hazelnut`, `carpet`. (You only need the top-level dataset archive, or the individual per-category archives for just those four.)
+
+### 3. Build manifests, train the models, and launch the demo
+
+Repeat for each category (`screw`, `bottle`, `hazelnut`, `carpet`):
+
+```bash
+python -m src.data.create_manifest --category screw
+python -m src.models.train_baseline --config config/screw_config.yaml
+python -m src.models.run_anomaly_detection --config config/screw_config.yaml
+```
+
+Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all four manifests exist:
+
+```bash
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet
+```
+
+Finally, launch the demo:
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+### 4. Verify everything works
+
+```bash
+python -m pytest tests/ -v
+```
+
+See [Quick Start](#quick-start) below for the condensed command list and [Pipeline Steps in Detail](#pipeline-steps-in-detail) for what each script/output actually is.
+
 ## Learning & Techniques Involved
 
 This project combines multiple pattern recognition / machine learning aspects, applied to several MVTec-AD categories:
@@ -61,6 +123,94 @@ To run the full pipeline on a different MVTec-AD category, copy `config/screw_co
 ```bash
 python -m src.models.train_category_classifier --categories screw bottle hazelnut <new_category>
 ```
+
+## Pipeline Steps in Detail
+
+### Step 1 — Build the manifest CSV
+
+**Script:** [src/data/create_manifest.py](src/data/create_manifest.py)
+
+**What it does:** walks `data/mvtec_anomaly_detection/<category>/train/good/` (all "good" images) and every `test/<defect_type>/` subfolder (`good` plus each defect type, e.g. `manipulated_front`, `scratch_head`), pairing each defective test image with its ground-truth mask from `ground_truth/<defect_type>/<name>_mask.png` when one exists. This is bookkeeping only — no model/algorithm involved, just a filesystem scan + CSV writer.
+
+**Output:** `data/manifests/<category>.csv` with columns `image_path, mask_path, split, label, defect_type` (`label` = 0 good / 1 defective). This manifest is the single source of truth every downstream script reads from — e.g. [data/manifests/screw.csv](data/manifests/screw.csv).
+
+### Step 2 — Train the supervised baseline classifier
+
+**Script:** [src/models/train_baseline.py](src/models/train_baseline.py), using [src/data/dataset.py](src/data/dataset.py) (`ManifestImageDataset`, `make_train_val_split`), [src/preprocessing/transform.py](src/preprocessing/transform.py) (resize/normalize + light augmentation for train, deterministic resize/normalize for val) and [src/models/baseline_classifier.py](src/models/baseline_classifier.py) (`build_baseline_model`).
+
+**What it does:** since MVTec's `train/` only has `good` images, this baseline instead carves a train/val split out of the *labeled* `test/` rows (`data.val_split` / `data.seed` in the config, e.g. 70/30 for screw) and trains a plain good-vs-defective image classifier on it.
+
+**Algorithm:** one of three interchangeable architectures (`model.architecture` in the config):
+- `resnet18` or `efficientnet_b0` — ImageNet-pretrained CNN backbone (transfer learning) with the final layer replaced by a 2-way linear head.
+- `simple_cnn` — a small 4-block Conv→BatchNorm→ReLU→MaxPool CNN ([SimpleCNN](src/models/baseline_classifier.py)) trained from scratch (no pretrained weights), used as a from-scratch comparison point.
+
+Trained with cross-entropy loss and the Adam optimizer for `train.epochs` epochs (`train.learning_rate`, `train.batch_size` from the config).
+
+**Output** (named `baseline_<architecture>_<category>`, so different architectures don't overwrite each other):
+- `models/checkpoints/baseline_<architecture>_<category>.pt` — model state dict.
+- `outputs/metrics/baseline_<architecture>_<category>_metrics.json` — accuracy, precision, recall, F1, confusion matrix on the held-out val subset.
+- `outputs/figures/baseline_<architecture>_<category>_confusion_matrix.png` — plotted confusion matrix.
+
+### Step 3 — Train and evaluate the unsupervised PatchCore anomaly detector
+
+**Script:** [src/models/run_anomaly_detection.py](src/models/run_anomaly_detection.py), using [src/models/anomaly_detector.py](src/models/anomaly_detector.py) (`PatchCoreAnomalyDetector`), [src/preprocessing/segmentation.py](src/preprocessing/segmentation.py) (foreground mask), [src/evaluation/metrics.py](src/evaluation/metrics.py) and [src/visualization/heatmap.py](src/visualization/heatmap.py).
+
+**What it does:** fits the detector on `train/good` only (no labels used at all), then scores every image in the full labeled `test/` split (good + every defect type).
+
+**Algorithm — PatchCore** (Roth et al., *"Towards Total Recall in Industrial Anomaly Detection"*, CVPR 2022; this implementation keeps the core recipe but drops the paper's optional softmax re-weighting term):
+1. **Locally-aware patch features:** a frozen, ImageNet-pretrained backbone (`anomaly_detection.backbone`: `resnet18` or `wide_resnet50_2`) extracts feature maps from two intermediate layers (`layer2`, `layer3`), each 3×3-average-pooled for local context and concatenated into one multi-scale patch feature map.
+2. **Memory bank via greedy coreset:** all patch features from every `train/good` image are subsampled with a greedy k-center coreset algorithm (`_greedy_coreset`) — starting from a random patch, it repeatedly keeps the patch farthest (in a Johnson–Lindenstrauss-projected space, for speed) from everything already selected — down to `anomaly_detection.coreset_ratio` of the pool, capped at `max_coreset_size` (2000) patches. This keeps the bank small while preserving diversity.
+3. **Scoring:** for a query image, each patch's anomaly score is its distance to the nearest neighbor in the memory bank; the image-level score is the max over patches (optionally after `compute_foreground_mask` pins background patches to the object's minimum distance, so only the object surface can drive the score); the per-patch score grid is bilinearly upsampled to the input resolution to form the anomaly heatmap.
+4. **Thresholding:** the good/defective decision boundary is chosen by maximizing Youden's J statistic (`youden_threshold`) on the ROC curve of image scores over the test set.
+
+**Evaluation** ([src/evaluation/metrics.py](src/evaluation/metrics.py)): image-level ROC-AUC + accuracy/precision/recall/F1 at the Youden threshold, plus pixel-level ROC-AUC (heatmap vs. ground-truth mask over every test pixel) and mean IoU/Dice (predicted vs. ground-truth defect mask at the pixel-level Youden threshold, defect images only).
+
+**Output** (named `patchcore_<backbone>_<category>`):
+- `models/checkpoints/patchcore_<backbone>_<category>_memory_bank.pt` — the memory bank tensor (the "trained model").
+- `outputs/metrics/patchcore_<backbone>_<category>_metrics.json` — AUROC, threshold, score min/max, pixel AUROC, pixel threshold, mean IoU, mean Dice, plus accuracy/precision/recall/F1.
+- `outputs/heatmaps/patchcore_<backbone>_<category>_<defect_type>_example.png` — one example figure per defect type: original image | predicted heatmap | ground-truth mask | overlay, for a quick visual sanity check.
+
+### Step 4 — Train the category classifier (auto-detect object type)
+
+**Script:** [src/models/train_category_classifier.py](src/models/train_category_classifier.py).
+
+**What it does:** combines every requested category's manifest (train + test rows, good and defective alike — object-type recognition doesn't care about defect status), replaces the good/defective label with a category index, and trains a multi-class "which object is this?" classifier on a stratified train/val split.
+
+**Algorithm:** ImageNet-pretrained ResNet18 (`build_baseline_model`) with an `N`-way head (`N` = number of categories), trained with cross-entropy + Adam for 8 epochs by default.
+
+**Output:**
+- `models/checkpoints/category_classifier_resnet18.pt` — model state dict.
+- `outputs/metrics/category_classifier_metrics.json` — the ordered category list (defines the label→name mapping), validation accuracy, and confusion matrix.
+
+### Step 5 — Launch the interactive Streamlit demo
+
+**Script:** [app/streamlit_app.py](app/streamlit_app.py).
+
+**What it does, end to end, for an uploaded image:**
+1. Runs the Step 4 category classifier to auto-detect the object type (`screw`/`bottle`/`hazelnut`/`carpet`), with a collapsed manual-override dropdown as a fallback.
+2. Loads that category's config, PatchCore memory bank (Step 3 checkpoint) and metrics file (for the decision threshold).
+3. Computes the Otsu foreground mask (`compute_foreground_mask`) unless the category's config sets `use_foreground_mask: false` (full-frame textures like `bottle`/`carpet`).
+4. Runs `PatchCoreAnomalyDetector.predict` to get the image anomaly score and pixel-level anomaly map.
+5. Turns the score into a **Normal / Defective** verdict by comparing against the stored Youden threshold.
+6. Buckets a "Defective" verdict into **Low / Medium / High severity** (`classify_severity`) based on what *fraction of the object's foreground area* is above the threshold, not just the raw score.
+7. Builds a threshold-anchored jet-colormap heatmap and image+heatmap overlay (`make_overlay` / `normalize_map_threshold`) so warm colors visually agree with the Normal/Defective decision.
+
+**Output:** an interactive UI showing the original image, the anomaly heatmap, and the overlay side by side, plus Prediction / Anomaly score / Severity metrics — nothing is persisted to disk (aside from Streamlit's in-memory model cache).
+
+### Step 6 (optional) — Fuse the classifier and PatchCore into a hybrid ensemble
+
+**Script:** [src/models/run_ensemble.py](src/models/run_ensemble.py) — see [Hybrid Ensemble](#hybrid-ensemble-fusing-the-classifier-and-patchcore) below for the full write-up, algorithm (weighted-average score fusion) and output (`outputs/metrics/ensemble_<architecture>_<category>_metrics.json`).
+
+### Step 7 — Run the unit tests
+
+**Command:** `python -m pytest tests/ -v`
+
+**What's tested:** the pure, model-free functions so correctness doesn't depend on having trained anything first —
+- [tests/test_metrics.py](tests/test_metrics.py): `compute_classification_metrics`, `youden_threshold`, `compute_iou`/`compute_dice`, `compute_pixel_level_metrics` against hand-built synthetic labels/scores/masks.
+- [tests/test_heatmap.py](tests/test_heatmap.py): `normalize_map`/`normalize_map_threshold`/`make_overlay` produce correctly-shaped, correctly-ranged outputs.
+- [tests/test_segmentation.py](tests/test_segmentation.py): `compute_foreground_mask` correctly separates a synthetic bright object from a dark background (and vice versa).
+
+**Output:** pytest pass/fail report in the terminal; no files are written.
 
 ## Model Comparison (Screw Category)
 
