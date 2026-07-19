@@ -12,6 +12,7 @@ This project is the practice module project for the NUS-ISS Graduate Certificate
 - `src/models/train_baseline.py` trains a supervised good/defective classifier (`resnet18` / `efficientnet_b0` / `simple_cnn`, see `src/models/baseline_classifier.py`) on a train/val split carved out of the labeled `test/` rows (MVTec's `train/` only has `good` images).
 - `src/models/run_anomaly_detection.py` fits an unsupervised PatchCore detector (`src/models/anomaly_detector.py`) on `train/good` only, then evaluates on the full labeled test set.
 - `src/models/train_category_classifier.py` trains a ResNet18 to auto-detect which category an image belongs to; `app/streamlit_app.py` uses it to route to the right per-category PatchCore model.
+- `src/models/train_defect_classifier.py` trains a per-category classifier over `defect_type` labels (defective images only, e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`) so the Streamlit demo can show what kind of defect was found, not just Normal/Defective. Optional per category — the app gracefully skips this if a category has no trained checkpoint.
 - `src/models/run_ensemble.py` fuses the classifier + PatchCore scores.
 - Everything is driven by per-category YAML in `config/` (e.g. `screw_config.yaml`) — copy one to add a new category, don't hardcode category-specific values in code.
 

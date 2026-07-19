@@ -10,6 +10,8 @@ Flow:
       -> Anomaly score
       -> Heatmap overlay (likely defect region highlighted in red)
       -> Defect severity: Low / Medium / High
+      -> Defect type (e.g. leather: color / cut / fold / glue / poke), if defective
+         and a defect-type classifier has been trained for the category
 """
 
 import json
@@ -125,6 +127,39 @@ def load_metrics(category: str, _config: dict) -> dict:
         return json.load(f)
 
 
+@st.cache_resource
+def load_defect_classifier(category: str, _config: dict):
+    """Load the per-category "what kind of defect is this?" classifier (see
+    src/models/train_defect_classifier.py). Returns (model, defect_types), or
+    (None, None) if it hasn't been trained yet for this category — the
+    defect-type breakdown is an optional add-on, not required for the
+    Normal/Defective verdict."""
+    model_cfg = _config["model"]
+    run_name = f"defect_classifier_{model_cfg['architecture']}_{category}"
+    checkpoint_path = PROJECT_ROOT / _config["output"]["checkpoint_dir"] / f"{run_name}.pt"
+    metrics_path = PROJECT_ROOT / _config["output"]["metrics_dir"] / f"{run_name}_metrics.json"
+
+    if not checkpoint_path.exists() or not metrics_path.exists():
+        return None, None
+
+    with metrics_path.open() as f:
+        defect_types = json.load(f)["defect_types"]
+
+    model = build_baseline_model(
+        architecture=model_cfg["architecture"], num_classes=len(defect_types), pretrained=False
+    )
+    model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+    model.eval()
+    return model, defect_types
+
+
+def detect_defect_type(model, defect_types, input_tensor: torch.Tensor):
+    with torch.no_grad():
+        probs = F.softmax(model(input_tensor), dim=1)[0]
+    pred_idx = int(probs.argmax().item())
+    return defect_types[pred_idx], float(probs[pred_idx].item()), probs.tolist()
+
+
 def classify_severity(anomaly_map: torch.Tensor, foreground_mask: np.ndarray, threshold: float):
     """Bucket a defective prediction into Low / Medium / High severity based
     on how much of the object's surface area is anomalous (not just the raw
@@ -198,6 +233,12 @@ def main() -> None:
     prediction = "Defective" if score >= threshold else "Normal"
     severity, severity_reason = classify_severity(result.anomaly_map, foreground_mask, threshold)
 
+    defect_type, defect_confidence = None, None
+    if prediction == "Defective":
+        defect_model, defect_types = load_defect_classifier(category, config)
+        if defect_model is not None:
+            defect_type, defect_confidence, _ = detect_defect_type(defect_model, defect_types, input_tensor)
+
     _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map, threshold=threshold)
 
     image_col, heatmap_col, overlay_col = st.columns(3)
@@ -216,10 +257,18 @@ def main() -> None:
     severity_col.metric("Severity", severity or "—")
 
     if prediction == "Defective":
+        if defect_type is not None:
+            st.metric("Likely defect type", defect_type, delta=f"confidence {defect_confidence:.0%}", delta_color="off")
+        else:
+            st.caption(
+                f"No defect-type classifier trained for **{category}** yet — run "
+                f"`python -m src.models.train_defect_classifier --config config/{category}_config.yaml` to enable this."
+            )
         st.error(
             f"Prediction: {prediction}\n\n"
             f"Anomaly score: {score:.2f} (decision threshold: {threshold:.2f})\n\n"
-            f"Severity: {severity} — {severity_reason}\n\n"
+            + (f"Defect type: {defect_type} (confidence {defect_confidence:.0%})\n\n" if defect_type else "")
+            + f"Severity: {severity} — {severity_reason}\n\n"
             "Likely defect region: highlighted in red"
         )
     else:
