@@ -1,0 +1,37 @@
+category: leather
+
+data:
+  manifest_path: data/manifests/leather.csv
+  image_size: 224
+  val_split: 0.3
+  seed: 42
+
+model:
+  architecture: resnet18   # resnet18, efficientnet_b0, or simple_cnn
+  pretrained: true
+  num_classes: 2
+
+train:
+  batch_size: 16
+  epochs: 10
+  learning_rate: 0.0001
+  num_workers: 2
+
+anomaly_detection:
+  backbone: resnet18       # resnet18 or wide_resnet50_2
+  layers: [layer2, layer3]
+  coreset_ratio: 0.1
+  max_coreset_size: 2000
+  projection_dim: 128
+  batch_size: 16
+  # Leather images are a close-up of a texture that fills the entire frame
+  # (no discrete object vs. plain background, unlike screw/hazelnut) -- same
+  # situation as bottle/carpet, so disable foreground masking; see README
+  # "Generalization to Other Categories".
+  use_foreground_mask: false
+
+output:
+  checkpoint_dir: models/checkpoints
+  metrics_dir: outputs/metrics
+  figures_dir: outputs/figures
+  heatmaps_dir: outputs/heatmaps

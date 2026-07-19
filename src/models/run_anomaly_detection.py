@@ -73,7 +73,12 @@ def main() -> None:
     train_dataset = ManifestImageDataset(train_rows, PROJECT_ROOT, transform=transform)
     train_loader = DataLoader(train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = (
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Using device: {device}")
     detector = PatchCoreAnomalyDetector(
         backbone=anomaly_cfg["backbone"],
         layers=tuple(anomaly_cfg["layers"]),

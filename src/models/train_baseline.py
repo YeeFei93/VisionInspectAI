@@ -104,7 +104,12 @@ def main() -> None:
         num_workers=train_cfg["num_workers"],
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Using device: {device}")
     model = build_baseline_model(
         architecture=model_cfg["architecture"],
         num_classes=model_cfg["num_classes"],

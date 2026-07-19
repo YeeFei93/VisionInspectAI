@@ -42,6 +42,7 @@ CATEGORY_CONFIGS = {
     "bottle": PROJECT_ROOT / "config" / "bottle_config.yaml",
     "hazelnut": PROJECT_ROOT / "config" / "hazelnut_config.yaml",
     "carpet": PROJECT_ROOT / "config" / "carpet_config.yaml",
+    "leather": PROJECT_ROOT / "config" / "leather_config.yaml",
 }
 
 CATEGORY_CLASSIFIER_CHECKPOINT = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
