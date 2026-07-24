@@ -82,6 +82,26 @@ def detect_category(model, categories, original_image: Image.Image):
     return categories[pred_idx], float(probs[pred_idx].item())
 
 
+def load_as_rgb(uploaded_file) -> Image.Image:
+    """Open an uploaded image and flatten it to RGB.
+
+    Many web/stock photos are RGBA PNGs with a transparent background.
+    Naively calling ``.convert("RGB")`` on those keeps whatever arbitrary
+    (often black or garbage) colour value sits behind the transparent
+    pixels, which PatchCore/the classifiers then treat as real texture —
+    inflating the anomaly score for reasons that have nothing to do with
+    the object itself. Compositing onto a neutral grey background first
+    avoids that artifact and is closer to MVTec-AD's plain backgrounds.
+    """
+    image = Image.open(uploaded_file)
+    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+        image = image.convert("RGBA")
+        background = Image.new("RGB", image.size, (128, 128, 128))
+        background.paste(image, mask=image.getchannel("A"))
+        return background
+    return image.convert("RGB")
+
+
 @st.cache_resource
 def load_config(category: str) -> dict:
     with CATEGORY_CONFIGS[category].open() as f:
@@ -194,10 +214,16 @@ def main() -> None:
         st.info(f"Upload a .png / .jpg image of one of: {', '.join(sorted(known_categories))}.")
         return
 
-    original_image = Image.open(uploaded_file).convert("RGB")
+    original_image = load_as_rgb(uploaded_file)
 
     detected_category, confidence = detect_category(category_model, known_categories, original_image)
     st.write(f"**Detected category:** {detected_category} (confidence {confidence:.0%})")
+    if confidence < 0.7:
+        st.warning(
+            "Low detection confidence — this image may not resemble the trained categories closely "
+            "enough (different framing/background/lighting than MVTec-AD, or not one of the trained "
+            "object types at all). Verify or override the category below before trusting the result."
+        )
 
     with st.expander("Not correct? Override the detected category"):
         options = sorted(known_categories)
