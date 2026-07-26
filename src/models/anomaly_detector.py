@@ -24,6 +24,26 @@ from torch import nn
 from torchvision import models
 
 
+def aggregate_patch_scores(patch_scores: torch.Tensor, mode: str = "quantile") -> torch.Tensor:
+    """Aggregate per-patch scores into a single image-level score.
+
+    The original implementation used the maximum patch score, which is very
+    sensitive to a few noisy patches. A quantile-based aggregation is a mild
+    but effective way to reduce false alarms on new images while keeping the
+    detector sensitive to real defects.
+    """
+    patch_scores = patch_scores.to(dtype=torch.float32)
+    if mode == "max":
+        return patch_scores.max()
+    if mode == "mean":
+        return patch_scores.mean()
+    if mode == "median":
+        return patch_scores.median()
+    if mode == "quantile":
+        return torch.quantile(patch_scores, 0.95)
+    raise ValueError(f"Unsupported score mode '{mode}'")
+
+
 @dataclass
 class AnomalyResult:
     image_score: float
@@ -122,6 +142,7 @@ class PatchCoreAnomalyDetector:
         projection_dim: int = 128,
         device: str = "cpu",
         seed: int = 42,
+        score_mode: str = "quantile",
     ):
         self.device = torch.device(device)
         self.extractor = PatchFeatureExtractor(backbone, layers).to(self.device)
@@ -129,6 +150,7 @@ class PatchCoreAnomalyDetector:
         self.max_coreset_size = max_coreset_size
         self.projection_dim = projection_dim
         self.seed = seed
+        self.score_mode = score_mode
         self.memory_bank: Optional[torch.Tensor] = None
 
     @torch.no_grad()
@@ -192,9 +214,10 @@ class PatchCoreAnomalyDetector:
                 mask_i = patch_masks[i]
                 background_fill = nn_dists[mask_i].min()
                 nn_dists = torch.where(mask_i, nn_dists, background_fill)
-                image_score = nn_dists[mask_i].max().item()
+                masked_scores = nn_dists[mask_i]
+                image_score = aggregate_patch_scores(masked_scores, mode=self.score_mode).item()
             else:
-                image_score = nn_dists.max().item()
+                image_score = aggregate_patch_scores(nn_dists, mode=self.score_mode).item()
 
             anomaly_map = nn_dists.reshape(1, 1, h, w)
             anomaly_map = F.interpolate(

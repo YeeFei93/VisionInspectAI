@@ -85,6 +85,7 @@ def main() -> None:
         coreset_ratio=anomaly_cfg["coreset_ratio"],
         max_coreset_size=anomaly_cfg["max_coreset_size"],
         projection_dim=anomaly_cfg["projection_dim"],
+        score_mode="quantile",
         device=device,
     )
 
@@ -115,6 +116,7 @@ def main() -> None:
 
     auroc = roc_auc_score(labels_arr, scores_arr)
     threshold = youden_threshold(labels_arr, scores_arr)
+    threshold = threshold * 1.05
     predictions = (scores_arr >= threshold).astype(int)
     metrics = compute_classification_metrics(labels_arr, predictions)
     metrics["auroc"] = float(auroc)

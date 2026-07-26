@@ -1,3 +1,4 @@
+
 """Lightweight foreground (object) segmentation for the plain-background
 MVTec-AD categories. Used to keep the anomaly score and heatmap focused on
 the actual part (e.g. the screw) instead of the plain background, as
