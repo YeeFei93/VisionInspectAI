@@ -194,21 +194,16 @@ eight-category manifests now tracked by the project.
 
 Per-category defect-type validation results were:
 
-| Category | RBF accuracy / macro F1 | GRNN accuracy / macro F1 |
-|---|---:|---:|
-| Screw | 0.556 / 0.524 | 0.361 / 0.356 |
-| Bottle | 0.842 / 0.842 | 0.579 / 0.463 |
-| Hazelnut | 0.714 / 0.706 | 0.286 / 0.183 |
-| Carpet | 0.704 / 0.698 | 0.333 / 0.283 |
-| Leather | 0.786 / 0.762 | 0.286 / 0.267 |
-| Grid | 0.333 / 0.311 | 0.167 / 0.197 |
-| Tile | 0.885 / 0.875 | 0.462 / 0.420 |
-| Wood | 0.889 / 0.863 | 0.444 / 0.392 |
-
-The SOM defect results were: screw `0.194 / 0.188`, bottle `0.789 / 0.775`,
-hazelnut `0.571 / 0.576`, carpet `0.481 / 0.471`, leather `0.714 / 0.706`,
-grid `0.278 / 0.209`, tile `0.731 / 0.738`, and wood `0.556 / 0.496`
-(accuracy / macro F1).
+| Category | RBF accuracy / macro F1 | GRNN accuracy / macro F1 | SOM accuracy / macro F1 |
+|---|---:|---:|---:|
+| Screw | 0.556 / 0.524 | 0.361 / 0.356 | 0.194 / 0.188 |
+| Bottle | 0.842 / 0.842 | 0.579 / 0.463 | 0.789 / 0.775 |
+| Hazelnut | 0.714 / 0.706 | 0.286 / 0.183 | 0.571 / 0.576 |
+| Carpet | 0.704 / 0.698 | 0.333 / 0.283 | 0.481 / 0.471 |
+| Leather | 0.786 / 0.762 | 0.286 / 0.267 | 0.714 / 0.706 |
+| Grid | 0.333 / 0.311 | 0.167 / 0.197 | 0.278 / 0.209 |
+| Tile | 0.885 / 0.875 | 0.462 / 0.420 | 0.731 / 0.738 |
+| Wood | 0.889 / 0.863 | 0.444 / 0.392 | 0.556 / 0.496 |
 
 SOM quantization-error anomaly ROC-AUC was: screw `0.514`, bottle `0.983`,
 hazelnut `0.911`, carpet `0.795`, leather `0.921`, grid `0.476`, tile
