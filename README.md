@@ -1,5 +1,5 @@
 # VisionInspectAI
-Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, `carpet`, and `leather`; the Streamlit demo auto-detects which one was uploaded.
+Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, and `tile`; the Streamlit demo auto-detects which one was uploaded.
 
 ## Getting Started (New Clone Setup)
 
@@ -31,11 +31,11 @@ data/mvtec_anomaly_detection/
 		ground_truth/<defect_type>/...
 ```
 
-At minimum, grab the categories this project is already configured for: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`. (You only need the top-level dataset archive, or the individual per-category archives for just those five.)
+At minimum, grab the categories this project is already configured for: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, and `tile`. (You only need the top-level dataset archive, or the individual per-category archives for these eight.)
 
 ### 3. Build manifests, train the models, and launch the demo
 
-Repeat for each category (`screw`, `bottle`, `hazelnut`, `carpet`, `leather`):
+Repeat for each category (`screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`):
 
 ```bash
 python -m src.data.create_manifest --category screw
@@ -43,10 +43,10 @@ python -m src.models.train_baseline --config config/screw_config.yaml
 python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 ```
 
-Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all five manifests exist:
+Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all eight manifests exist:
 
 ```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile
 ```
 
 Optionally, train each category's defect-type classifier (needed for the Streamlit demo to show *what kind* of defect was found, not just Normal/Defective):
@@ -242,10 +242,10 @@ unsupervised anomaly localization.
 
 To compare baseline classifier architectures, point `train_baseline.py` at any of `config/screw_config.yaml` (ResNet18), `config/screw_config_efficientnet_b0.yaml`, or `config/screw_config_simple_cnn.yaml` — each writes its own checkpoint/metrics file so results don't overwrite each other.
 
-To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
+To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
 
 ```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather <new_category>
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile <new_category>
 ```
 
 ## Pipeline Steps in Detail
@@ -395,7 +395,7 @@ python -m src.models.run_ensemble --config config/screw_config.yaml --classifier
 
 ## Generalization to Other Categories
 
-The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was run end-to-end on four more MVTec-AD categories, picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), `carpet` (a close-up textile texture filling the whole frame, no discrete object at all), and `leather` (another close-up, full-frame texture, same situation as carpet).
+The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was run end-to-end on seven more MVTec-AD categories, picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), `carpet` (a close-up textile texture filling the whole frame, no discrete object at all), `leather` (another close-up, full-frame texture, same situation as carpet), `wood` (wood grain texture surface), `grid` (regular geometric grid pattern), and `tile` (repeating tile texture).
 
 | Category | Classifier val accuracy/F1 | PatchCore image ROC-AUC | PatchCore pixel ROC-AUC | Mean IoU | Mean Dice |
 |---|---|---|---|---|---|
@@ -404,28 +404,42 @@ The same pipeline (manifest → baseline classifier → PatchCore → Streamlit 
 | Hazelnut | 1.00 / 1.00 | 0.998 | 0.970 | 0.209 | 0.320 |
 | Carpet | 0.92 / 0.94 | 0.971 | 0.987 | 0.251 | 0.372 |
 | Leather | 1.00 / 1.00 | 1.000 | **0.991** | 0.127 | 0.210 |
+| Grid | 0.83 / 0.88 | 0.784 | 0.947 | 0.076 | 0.135 |
+| Tile | 0.94 / 0.96 | **0.997** | 0.941 | 0.383 | 0.518 |
+| Wood | 1.00 / 1.00 | 0.989 | 0.930 | 0.187 | 0.291 |
 
 **Finding — the classifier's "perfect scores" issue isn't universal.** Unlike screw and hazelnut, the bottle classifier scored a believable 0.88 accuracy / 0.92 F1, not 1.0 (its held-out val subset is smaller — only 25 images — and the defects are more subtle). This is a useful counter-example confirming that the earlier "misleadingly perfect" finding is specifically a symptom of the *screw* dataset being small/easy, not a bug in the evaluation code.
 
 **Finding — the foreground-masking heuristic doesn't generalize automatically, and blindly applying it can actively hurt localization.** The Otsu-based foreground mask ([src/preprocessing/segmentation.py](src/preprocessing/segmentation.py)) assumes a plain background with the object as the minority of pixels — true for screw and hazelnut, but **false for bottle**, whose images are a top-down shot where the bottle mouth fills the entire frame. Applying it anyway made bottle's pixel-level ROC-AUC **worse than random (0.374)**: Otsu split the frame into the dark inner bottle opening vs. the lighter rim, and incorrectly zeroed out real defect pixels that happened to fall inside the dark "background" region. Adding a `use_foreground_mask: false` toggle to `bottle_config.yaml` (and threading it through [run_anomaly_detection.py](src/models/run_anomaly_detection.py) and the Streamlit app) fixed it immediately: pixel ROC-AUC jumped to 0.981 and mean IoU/Dice became the *best* of screw/bottle/hazelnut (0.40 / 0.55) — confirmed visually, the predicted heatmap now matches the crescent-shaped ground-truth defect almost exactly. **Lesson:** any hand-crafted heuristic derived from one category's visual layout should be treated as a per-category, config-driven option, not a hardcoded assumption — and always sanity-check pixel-level metrics per category rather than assuming an improvement that helped one category will help (or even be neutral for) another.
 
-**Applying the lesson upfront — `carpet` and `leather`.** Both are full-frame textures just like `bottle` (no discrete object vs. background), so their configs were created with `use_foreground_mask: false` from the start instead of discovering the problem the hard way again. Result: carpet got the best pixel-level ROC-AUC of the first four categories (0.987), and leather pushed that further to **0.991** — the best of all five categories — on the first run each time, concrete evidence that the earlier fix generalized into a repeatable, config-driven decision rather than a one-off patch. Leather's mean IoU/Dice (0.127 / 0.210) are lower than carpet's, though — a reminder that pixel ROC-AUC (ranking) and IoU/Dice (tight overlap) are still independent axes even within the same `use_foreground_mask: false` texture group (see the IoU/Dice lesson below).
+**Applying the lesson upfront — `carpet` and `leather`.** Both are full-frame textures just like `bottle` (no discrete object vs. background), so their configs were created with `use_foreground_mask: false` from the start instead of discovering the problem the hard way again. Result: carpet got the best pixel-level ROC-AUC of the first four categories (0.987), and leather pushed that further to **0.991** — the best across the five-category run — on the first run each time, concrete evidence that the earlier fix generalized into a repeatable, config-driven decision rather than a one-off patch. Leather's mean IoU/Dice (0.127 / 0.210) are lower than carpet's, though — a reminder that pixel ROC-AUC (ranking) and IoU/Dice (tight overlap) are still independent axes even within the same `use_foreground_mask: false` texture group (see the IoU/Dice lesson below).
 
-The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category at all: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a small ResNet18 classifier to recognize the object type itself (all five categories are visually distinct enough that it hits 100% validation accuracy, even with carpet and leather added), and the app runs it first on the uploaded image to auto-detect the category, then routes to that category's PatchCore detector automatically — with a collapsed "override" dropdown as a manual fallback if it's ever wrong. Adding a new category only requires a new `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` plus retraining the category classifier with it included.
+**Scaling to eight categories — `wood`, `grid`, and `tile`.** Adding three more texture-based categories pushed the analysis to eight total. Grid (a regular geometric pattern) shows weaker performance overall (0.784 image AUROC, 0.83 classifier accuracy) — likely due to the regular repeating pattern making subtle defect anomalies harder to distinguish from normal pattern variations. Tile (a repeating tile texture) performs strongly, nearly matching leather's performance (0.997 image AUROC, 0.94 classifier accuracy) with the best mean IoU/Dice (0.383 / 0.518) among all eight categories, suggesting its defects are spatially localized and visually distinct. Wood (wood grain texture) achieves perfect classifier accuracy (1.00) and strong PatchCore image AUROC (0.989), but lower pixel-level AUROC (0.930) and IoU/Dice, indicating good image-level anomaly detection but less precise pixel localization — likely because wood grain itself has high natural texture variation. All three new categories maintained the eight-category category classifier's 100% validation accuracy, confirming that the object types remain visually distinct even as the dataset scales.
+
+The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category at all: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a small ResNet18 classifier to recognize the object type itself (all eight categories are visually distinct enough that it hits 100% validation accuracy, even with the texture-based categories like carpet, leather, wood, grid, and tile added), and the app runs it first on the uploaded image to auto-detect the category, then routes to that category's PatchCore detector automatically — with a collapsed "override" dropdown as a manual fallback if it's ever wrong. Adding a new category only requires a new `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` plus retraining the category classifier with it included.
 
 ## Defect-Type Classification (per category)
 
 Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.py](src/models/train_defect_classifier.py) trains a per-category, multi-class classifier over each category's own `defect_type` labels (defective images only, see [Step 5](#step-5--train-the-defect-type-classifier-per-category)), and [app/streamlit_app.py](app/streamlit_app.py) shows the predicted defect type + confidence whenever a "Defective" verdict is reached and a matching checkpoint exists.
 
-| Category | Defect types | Train / val images | Val accuracy |
+**Note:** The train/val image counts below refer only to **defective test images** (label=1), not the full test set. For example, screw has 160 total test images (41 good + 119 defective), but the defect-type classifier only uses the 119 defective ones, split 70/30 into training and validation.
+
+| Category | Defect types | Train / val images (defective only) | Val accuracy |
 |---|---|---|---|
 | Screw | manipulated_front, scratch_head, scratch_neck, thread_side, thread_top (5) | 83 / 36 | 0.444 |
 | Bottle | broken_large, broken_small, contamination (3) | 44 / 19 | 0.789 |
 | Hazelnut | crack, cut, hole, print (4) | 49 / 21 | 0.857 |
 | Carpet | color, cut, hole, metal_contamination, thread (5) | 62 / 27 | 0.815 |
 | Leather | color, cut, fold, glue, poke (5) | 64 / 28 | **0.964** |
+| Grid | bent, broken, glue, metal_contamination, thread (5) | 40 / 17 | 0.222 |
+| Tile | crack, glue_strip, gray_stroke, oil, rough (5) | 59 / 25 | **0.923** |
+| Wood | color, combined, hole, liquid, scratch (5) | 42 / 18 | 0.667 |
 
-**Finding — fine-grained defect-type accuracy tracks per-class sample count, not just class count.** Screw and leather both have 5 defect types, yet screw's val accuracy (0.444) is by far the worst of the five categories while leather's (0.964) is the best. Screw's confusion matrix shows `thread_side` and `thread_top` absorbing most of the misclassifications from the other three classes (`[[2,0,0,5,0],[0,5,0,2,0],[0,1,1,5,1],[0,0,0,6,1],[0,0,0,5,2]]`) — with only 83 train images spread over 5 classes (~16–17 images/class), and screw's defect types being subtle, visually-similar deviations on the same small grey object (a scratch on the head vs. the neck, thread wear on one side vs. the top), there's neither enough data nor enough visual separation for the model to tell them apart reliably. Leather's defect types, by contrast, are visually distinct surface phenomena (a color blotch vs. a cut vs. a glue smear) despite a similarly small dataset (64 train images), so it reaches near-perfect accuracy. **Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are — screw is a case where more data alone likely wouldn't fully fix it without also addressing the inherent visual similarity between its defect types.
+**Finding — fine-grained defect-type accuracy tracks per-class sample count, not just class count.** Screw and leather both have 5 defect types, yet screw's val accuracy (0.444) is far worse while leather's (0.964) is among the best. Screw's confusion matrix shows `thread_side` and `thread_top` absorbing most misclassifications — with only 83 train images spread over 5 classes (~16–17 images/class), and screw's defect types being subtle, visually-similar deviations on the same small grey object (a scratch on the head vs. the neck, thread wear on one side vs. the top), there's neither enough data nor enough visual separation for reliable distinction. Leather's defect types, by contrast, are visually distinct surface phenomena (a color blotch vs. a cut vs. a glue smear) despite a similarly small dataset (64 train images), so it reaches near-perfect accuracy.
+
+**Scaling to eight categories — grid, tile, and wood.** Adding three more defect-type classifiers reveals the wide variance in fine-grained accuracy even within a balanced 5-defect-type setup. **Grid** performs poorly (0.222 accuracy) — its defect types (bent, broken, glue, metal_contamination, thread) are subtle spatial/material variations on a regular geometric grid pattern, making them inherently confusable (the confusion matrix shows glue absorbing predictions from all other classes). **Tile** achieves excellent performance (0.923 accuracy, the second-best across all eight categories) — its defect types (crack, glue_strip, gray_stroke, oil, rough) are visually distinct surface phenomena (structural damage vs. surface contamination/discoloration), providing clear visual separation despite similar dataset size to grid. **Wood** reaches a middle ground (0.667 accuracy) — its defect types (color, combined, hole, liquid, scratch) include some visually distinct types (hole vs. scratch) but combined defects and color blotches are harder to disentangle from natural wood grain variation.
+
+**Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are. Screw (0.444) and grid (0.222) are cases where the defect types are inherently subtle or overlapping even with more training data; leather (0.964) and tile (0.923) succeed because their defect types are visually distinct phenomena. The task is fundamentally harder than object-category detection (100% accuracy across all eight categories) or binary good/defective classification (both are coarser-grained decisions with better natural class separation).
 
 ## Notes & Lessons Learned
 
