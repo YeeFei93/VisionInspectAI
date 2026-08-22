@@ -125,6 +125,121 @@ streamlit run app/streamlit_app.py
 python -m pytest tests/ -v
 ```
 
+### Optional — RBF, GRNN, and SOM comparison
+
+The project also includes embedding-based Radial Basis Function (RBF),
+General Regression Neural Network (GRNN), and Self-Organizing Map (SOM)
+models. All use fixed, ImageNet-pretrained ResNet18 512-dimensional
+embeddings, then fit a shallow model on those features. This makes the
+comparison fair without treating raw image pixels as a kernel input. The
+train/validation split matches the corresponding CNN experiment for each
+classification task.
+
+Run both classifiers for the supervised good/defective baseline:
+
+```bash
+python -m src.models.train_kernel_classifiers \
+  --task baseline --config config/screw_config.yaml
+```
+
+Run object category classification:
+
+```bash
+python -m src.models.train_kernel_classifiers \
+  --task category --categories screw bottle hazelnut carpet leather grid tile wood
+```
+
+Run per-category defect-type classification:
+
+```bash
+python -m src.models.train_kernel_classifiers \
+  --task defect --config config/screw_config.yaml
+```
+
+Use `--classifier rbf`, `--classifier grnn`, or `--classifier som` to run one
+model. With `--classifier both`, all three models are trained. Each run writes
+a separate pickle checkpoint, metrics JSON, and confusion-matrix figure under
+`models/checkpoints/`, `outputs/metrics/`, and `outputs/figures/`, respectively.
+SOM runs also write a U-Matrix image.
+
+For unsupervised SOM anomaly exploration, train the map on `train/good` only
+and score the labeled test set using quantization error:
+
+```bash
+python -m src.models.train_kernel_classifiers \
+  --task anomaly --config config/screw_config.yaml
+```
+
+This produces image-level anomaly metrics and compares the SOM ROC-AUC with
+the stored PatchCore ROC-AUC when that metric file exists. SOM anomaly
+exploration does not produce pixel heatmaps; PatchCore remains the model used
+for unsupervised defect localization.
+
+#### Measured comparison results
+
+These runs used the existing validation protocols and fixed ResNet18
+embeddings. The screw baseline is directly comparable with the supervised
+ResNet18 and Simple CNN results above; the category and defect results use the
+eight-category manifests now tracked by the project.
+
+| Task / split | Model | Accuracy | Macro F1 | ROC-AUC |
+|---|---|---:|---:|---:|
+| Screw good/defective | ResNet18 | 1.000 | 1.000 | n/a |
+| Screw good/defective | Simple CNN | 1.000 | 1.000 | n/a |
+| Screw good/defective | RBF + ResNet18 embeddings | 0.833 | 0.764 | 0.824 |
+| Screw good/defective | GRNN + ResNet18 embeddings | 0.708 | 0.681 | 0.660 |
+| Eight-category object classification | RBF + ResNet18 embeddings | 1.000 | 1.000 | 1.000 OVR |
+| Eight-category object classification | GRNN + ResNet18 embeddings | 0.977 | 0.976 | 0.989 OVR |
+| Eight-category object classification | SOM + ResNet18 embeddings | 1.000 | 1.000 | 1.000 OVR |
+
+Per-category defect-type validation results were:
+
+| Category | RBF accuracy / macro F1 | GRNN accuracy / macro F1 | SOM accuracy / macro F1 |
+|---|---:|---:|---:|
+| Screw | 0.556 / 0.524 | 0.361 / 0.356 | 0.194 / 0.188 |
+| Bottle | 0.842 / 0.842 | 0.579 / 0.463 | 0.789 / 0.775 |
+| Hazelnut | 0.714 / 0.706 | 0.286 / 0.183 | 0.571 / 0.576 |
+| Carpet | 0.704 / 0.698 | 0.333 / 0.283 | 0.481 / 0.471 |
+| Leather | 0.786 / 0.762 | 0.286 / 0.267 | 0.714 / 0.706 |
+| Grid | 0.333 / 0.311 | 0.167 / 0.197 | 0.278 / 0.209 |
+| Tile | 0.885 / 0.875 | 0.462 / 0.420 | 0.731 / 0.738 |
+| Wood | 0.889 / 0.863 | 0.444 / 0.392 | 0.556 / 0.496 |
+
+SOM quantization-error anomaly ROC-AUC was: screw `0.514`, bottle `0.983`,
+hazelnut `0.911`, carpet `0.795`, leather `0.921`, grid `0.476`, tile
+`0.978`, and wood `0.885`. The matching stored PatchCore image ROC-AUC values
+were screw `0.909`, bottle `1.000`, hazelnut `0.998`, carpet `0.971`, leather
+`1.000`, grid `1.000`, tile `1.000`, and wood `1.000`.
+
+**SOM interpretation by task:**
+
+- **Good/defective baseline:** SOM is a weak primary classifier here. On
+  screw it reached `0.708` accuracy but only `0.500` ROC-AUC, versus RBF's
+  `0.833` and `0.824`. The map preserves embedding topology but does not
+  directly learn the binary decision boundary.
+- **Object category classification:** SOM is highly useful. Whole object
+  categories are well separated in ResNet embedding space, so majority-label
+  SOM nodes achieved `1.000` accuracy and OVR ROC-AUC, matching RBF and
+  exceeding GRNN's `0.977` accuracy. The U-Matrix is useful for visualizing
+  category separation.
+- **Defect-type classification:** SOM is a useful exploratory model but not
+  the strongest predictor. It exceeded GRNN on bottle, hazelnut, carpet,
+  leather, tile, and wood, but RBF remained stronger overall. Its screw and
+  grid results were poor because visually similar defect types overlap in
+  embedding space; the SOM map makes that overlap visible.
+- **Unsupervised anomaly exploration:** SOM is useful as a compact embedding
+  novelty detector for bottle and tile, where its ROC-AUC was `0.983` and
+  `0.978`, but it was near random for screw and grid. PatchCore remains the
+  more reliable anomaly detector and is the only one of these models producing
+  pixel-level heatmaps.
+
+**Finding:** RBF was the strongest shallow classifier overall, SOM was the most
+useful for object-category structure and selected anomaly-exploration cases,
+and GRNN was generally weakest on these small fine-grained splits. SOM should
+therefore be presented as both a classifier comparison and an interpretable
+topology/novelty analysis tool, not as a replacement for PatchCore's
+unsupervised anomaly localization.
+
 To compare baseline classifier architectures, point `train_baseline.py` at any of `config/screw_config.yaml` (ResNet18), `config/screw_config_efficientnet_b0.yaml`, or `config/screw_config_simple_cnn.yaml` — each writes its own checkpoint/metrics file so results don't overwrite each other.
 
 To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:

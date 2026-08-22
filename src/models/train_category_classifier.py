@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--categories",
         nargs="+",
-        default=["screw", "bottle", "hazelnut"],
+        default=["screw", "bottle", "hazelnut", "carpet", "leather", "grid", "tile", "wood"],
         help="Categories to include (must each have data/manifests/<category>.csv).",
     )
     parser.add_argument("--image-size", type=int, default=224)
