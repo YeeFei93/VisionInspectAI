@@ -9,10 +9,9 @@ the input resolution) form the anomaly heatmap that highlights the
 suspected defect region.
 
 Reference: Roth et al., "Towards Total Recall in Industrial Anomaly
-Detection" (PatchCore), CVPR 2022. This implementation keeps the core idea
-(locally-aware patch features + greedy coreset memory bank + nearest-
-neighbor scoring) but omits the paper's optional softmax re-weighting term
-for simplicity.
+Detection" (PatchCore), CVPR 2022. This implementation supports nearest-
+neighbor or k-nearest-neighbor patch scoring and the paper's optional
+softmax image-score reweighting.
 """
 
 from dataclasses import dataclass
@@ -28,6 +27,57 @@ from torchvision import models
 class AnomalyResult:
     image_score: float
     anomaly_map: torch.Tensor  # (H, W), upsampled to the input image resolution
+
+
+def scoring_artifact_suffix(
+    num_neighbors: int = 1,
+    softmax_reweighting: bool = False,
+    reweight_num_neighbors: int = 9,
+) -> str:
+    suffix = f"_knn{num_neighbors}" if num_neighbors != 1 else ""
+    if softmax_reweighting:
+        suffix += f"_rw{reweight_num_neighbors}"
+    return suffix
+
+
+def _knn_patch_scores(
+    distances: torch.Tensor, num_neighbors: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return mean k-NN patch scores and each patch's closest-bank index."""
+    if num_neighbors <= 0:
+        raise ValueError("num_neighbors must be positive")
+    if num_neighbors > distances.shape[1]:
+        raise ValueError("num_neighbors cannot exceed the memory-bank size")
+    nearest_distances, nearest_indices = torch.topk(
+        distances, k=num_neighbors, dim=1, largest=False, sorted=True
+    )
+    return nearest_distances.mean(dim=1), nearest_indices[:, 0]
+
+
+def _softmax_reweighted_score(
+    query_patch: torch.Tensor,
+    nearest_memory_index: int,
+    memory_bank: torch.Tensor,
+    patch_score: torch.Tensor,
+    num_neighbors: int,
+) -> torch.Tensor:
+    """Apply PatchCore's neighborhood softmax weight to one image score."""
+    if num_neighbors <= 1:
+        raise ValueError("reweight_num_neighbors must be greater than 1")
+    num_neighbors = min(num_neighbors, len(memory_bank))
+    nearest_memory_patch = memory_bank[nearest_memory_index : nearest_memory_index + 1]
+    memory_distances = torch.cdist(nearest_memory_patch, memory_bank).squeeze(0)
+    neighborhood_indices = torch.topk(
+        memory_distances, k=num_neighbors, largest=False
+    ).indices
+    query_distances = torch.cdist(
+        query_patch.reshape(1, -1), memory_bank[neighborhood_indices]
+    ).squeeze(0)
+    nearest_position = torch.nonzero(
+        neighborhood_indices == nearest_memory_index, as_tuple=False
+    ).item()
+    nearest_probability = torch.softmax(query_distances, dim=0)[nearest_position]
+    return (1 - nearest_probability) * patch_score
 
 
 class PatchFeatureExtractor(nn.Module):
@@ -81,20 +131,43 @@ class PatchFeatureExtractor(nn.Module):
 
 
 def _greedy_coreset(
-    features: torch.Tensor, n_select: int, projection_dim: int = 128, seed: int = 42
+    features: torch.Tensor,
+    n_select: int,
+    projection_dim: int = 128,
+    seed: int = 42,
+    projection_method: str = "random",
 ) -> torch.Tensor:
-    """Approximate greedy k-center coreset selection. A Johnson-Lindenstrauss
-    random projection speeds up the pairwise distance computations used to
-    pick maximally-diverse patches, as in the PatchCore paper. The returned
-    features are the original (non-projected) vectors."""
+    """Approximate greedy k-center coreset selection. Distances used to pick
+    maximally-diverse patches are computed in a lower-dimensional projected
+    space for speed; the returned features are always the original
+    (non-projected) vectors.
+
+    `projection_method`:
+    - "random" (default, as in the PatchCore paper): a Johnson-Lindenstrauss
+      random projection. Cheap and data-independent.
+    - "pca": a PCA projection onto the top `projection_dim` principal
+      components (via `torch.pca_lowrank`), fit on `features` itself.
+      Experimental/for-comparison only — unlike the random projection this
+      is data-dependent (costs an extra SVD) and, being variance-maximizing
+      rather than distance-preserving, is not guaranteed to preserve the
+      pairwise distances the greedy k-center selection relies on as well as
+      the JL random projection does.
+    """
     n_total, dim = features.shape
     if n_select >= n_total:
         return features
 
     generator = torch.Generator().manual_seed(seed)
     projection_dim = min(projection_dim, dim)
-    projection = torch.randn(dim, projection_dim, generator=generator)
-    projected = features @ projection
+    if projection_method == "pca":
+        torch.manual_seed(seed)
+        _u, _s, v = torch.pca_lowrank(features, q=projection_dim)
+        projected = features @ v
+    elif projection_method == "random":
+        projection = torch.randn(dim, projection_dim, generator=generator)
+        projected = features @ projection
+    else:
+        raise ValueError(f"Unsupported projection_method '{projection_method}'. Choose 'random' or 'pca'.")
 
     selected_indices: List[int] = []
     min_distances = torch.full((n_total,), float("inf"))
@@ -122,6 +195,10 @@ class PatchCoreAnomalyDetector:
         projection_dim: int = 128,
         device: str = "cpu",
         seed: int = 42,
+        projection_method: str = "random",
+        num_neighbors: int = 1,
+        softmax_reweighting: bool = False,
+        reweight_num_neighbors: int = 9,
     ):
         self.device = torch.device(device)
         self.extractor = PatchFeatureExtractor(backbone, layers).to(self.device)
@@ -129,6 +206,14 @@ class PatchCoreAnomalyDetector:
         self.max_coreset_size = max_coreset_size
         self.projection_dim = projection_dim
         self.seed = seed
+        self.projection_method = projection_method
+        if num_neighbors <= 0:
+            raise ValueError("num_neighbors must be positive")
+        if reweight_num_neighbors <= 1:
+            raise ValueError("reweight_num_neighbors must be greater than 1")
+        self.num_neighbors = num_neighbors
+        self.softmax_reweighting = softmax_reweighting
+        self.reweight_num_neighbors = reweight_num_neighbors
         self.memory_bank: Optional[torch.Tensor] = None
 
     @torch.no_grad()
@@ -149,7 +234,11 @@ class PatchCoreAnomalyDetector:
 
         n_select = min(self.max_coreset_size, max(1, int(len(all_patches) * self.coreset_ratio)))
         self.memory_bank = _greedy_coreset(
-            all_patches, n_select=n_select, projection_dim=self.projection_dim, seed=self.seed
+            all_patches,
+            n_select=n_select,
+            projection_dim=self.projection_dim,
+            seed=self.seed,
+            projection_method=self.projection_method,
         )
 
     @torch.no_grad()
@@ -186,21 +275,33 @@ class PatchCoreAnomalyDetector:
         results = []
         for i in range(b):
             dists = torch.cdist(patches[i], self.memory_bank)  # (h*w, bank_size)
-            nn_dists, _ = dists.min(dim=1)  # nearest-neighbor distance per patch
+            patch_scores, nearest_indices = _knn_patch_scores(dists, self.num_neighbors)
 
             if patch_masks is not None and patch_masks[i].any():
                 mask_i = patch_masks[i]
-                background_fill = nn_dists[mask_i].min()
-                nn_dists = torch.where(mask_i, nn_dists, background_fill)
-                image_score = nn_dists[mask_i].max().item()
+                background_fill = patch_scores[mask_i].min()
+                patch_scores = torch.where(mask_i, patch_scores, background_fill)
+                image_patch_index = int(
+                    torch.where(mask_i, patch_scores, torch.tensor(float("-inf"))).argmax().item()
+                )
             else:
-                image_score = nn_dists.max().item()
+                image_patch_index = int(patch_scores.argmax().item())
 
-            anomaly_map = nn_dists.reshape(1, 1, h, w)
+            image_score = patch_scores[image_patch_index]
+            if self.softmax_reweighting:
+                image_score = _softmax_reweighted_score(
+                    patches[i, image_patch_index],
+                    int(nearest_indices[image_patch_index].item()),
+                    self.memory_bank,
+                    image_score,
+                    self.reweight_num_neighbors,
+                )
+
+            anomaly_map = patch_scores.reshape(1, 1, h, w)
             anomaly_map = F.interpolate(
                 anomaly_map, size=image_size, mode="bilinear", align_corners=False
             ).squeeze()
-            results.append(AnomalyResult(image_score=image_score, anomaly_map=anomaly_map))
+            results.append(AnomalyResult(image_score=image_score.item(), anomaly_map=anomaly_map))
 
         return results
 

@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -28,12 +29,14 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 
 from src.data.dataset import ManifestImageDataset, load_manifest
+from src.evaluation.metrics import compute_per_class_report, plot_training_curves
 from src.models.baseline_classifier import build_baseline_model
 from src.preprocessing.transform import get_train_transforms, get_val_transforms
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHECKPOINT_PATH = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
 METRICS_PATH = PROJECT_ROOT / "outputs" / "metrics" / "category_classifier_metrics.json"
+FIGURE_PATH = PROJECT_ROOT / "outputs" / "figures" / "category_classifier_resnet18_training_curves.png"
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=0.0001)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=3,
+        help="Stop after this many epochs without val-loss improvement (0 disables).",
+    )
     return parser.parse_args()
 
 
@@ -67,9 +76,10 @@ def build_combined_manifest(categories: list) -> pd.DataFrame:
     return combined, categories
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
+def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     running_loss = 0.0
+    correct = 0
     for images, labels in loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
@@ -78,24 +88,33 @@ def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
         loss.backward()
         optimizer.step()
         running_loss += loss.item() * images.size(0)
-    return running_loss / len(loader.dataset)
+        correct += (outputs.argmax(dim=1) == labels).sum().item()
+    dataset_size = len(loader.dataset)
+    return running_loss / dataset_size, correct / dataset_size
 
 
 @torch.no_grad()
-def predict(model, loader, device):
+def evaluate(model, loader, criterion, device):
     model.eval()
+    running_loss = 0.0
     all_preds, all_labels = [], []
     for images, labels in loader:
-        images = images.to(device)
+        images, labels = images.to(device), labels.to(device)
         outputs = model(images)
+        loss = criterion(outputs, labels)
+        running_loss += loss.item() * images.size(0)
         preds = outputs.argmax(dim=1).cpu().tolist()
         all_preds.extend(preds)
-        all_labels.extend(labels.tolist())
-    return all_labels, all_preds
+        all_labels.extend(labels.cpu().tolist())
+    dataset_size = len(loader.dataset)
+    accuracy = sum(p == t for p, t in zip(all_preds, all_labels)) / dataset_size
+    return running_loss / dataset_size, accuracy, all_labels, all_preds
 
 
 def main() -> None:
     args = parse_args()
+
+    torch.manual_seed(args.seed)
 
     manifest, categories = build_combined_manifest(args.categories)
     print(f"Categories (label order): {categories}")
@@ -129,25 +148,80 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
+    best_state = copy.deepcopy(model.state_dict())
+    best_val_loss = float("inf")
+    best_epoch = 0
+    epochs_without_improvement = 0
+    history = []
     for epoch in range(1, args.epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        print(f"Epoch {epoch}/{args.epochs} - train_loss: {train_loss:.4f}")
+        train_loss, train_accuracy = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, val_accuracy, y_true, y_pred = evaluate(model, val_loader, criterion, device)
+        learning_rate = optimizer.param_groups[0]["lr"]
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
+                "val_loss": val_loss,
+                "val_accuracy": val_accuracy,
+                "learning_rate": learning_rate,
+            }
+        )
+        print(
+            f"Epoch {epoch}/{args.epochs} - "
+            f"accuracy: {train_accuracy:.4f} - loss: {train_loss:.4f} - "
+            f"val_accuracy: {val_accuracy:.4f} - val_loss: {val_loss:.4f} - "
+            f"learning_rate: {learning_rate:.4g}"
+        )
 
-    y_true, y_pred = predict(model, val_loader, device)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            best_state = copy.deepcopy(model.state_dict())
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
+                print(f"Early stopping at epoch {epoch}; best epoch was {best_epoch}.")
+                break
+
+    model.load_state_dict(best_state)
+    _val_loss, _val_accuracy, y_true, y_pred = evaluate(model, val_loader, criterion, device)
+
     accuracy = accuracy_score(y_true, y_pred)
     cm = confusion_matrix(y_true, y_pred).tolist()
-    print(f"Validation accuracy: {accuracy:.4f}")
+    per_class_report = compute_per_class_report(y_true, y_pred, categories)
+    print(f"Validation accuracy (best epoch restored): {accuracy:.4f}")
     print(f"Confusion matrix (rows=true, cols=pred, order={categories}): {cm}")
+    print("Per-class report:")
+    print(json.dumps(per_class_report, indent=2))
 
     CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FIGURE_PATH.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), CHECKPOINT_PATH)
     METRICS_PATH.write_text(
-        json.dumps({"categories": categories, "val_accuracy": accuracy, "confusion_matrix": cm}, indent=2)
+        json.dumps(
+            {
+                "categories": categories,
+                "val_accuracy": accuracy,
+                "confusion_matrix": cm,
+                "classification_report": per_class_report,
+                "history": history,
+                "seed": args.seed,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_val_loss,
+                "epochs_trained": len(history),
+                "early_stopping_patience": args.early_stopping_patience,
+            },
+            indent=2,
+        )
     )
+    plot_training_curves(history, output_path=FIGURE_PATH, title_prefix="Category classifier")
 
     print(f"Saved checkpoint to {CHECKPOINT_PATH}")
     print(f"Saved metrics to {METRICS_PATH}")
+    print(f"Saved training curves figure to {FIGURE_PATH}")
 
 
 if __name__ == "__main__":

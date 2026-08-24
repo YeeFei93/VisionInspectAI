@@ -1,7 +1,7 @@
-category: leather
+category: transistor
 
 data:
-  manifest_path: data/manifests/leather.csv
+  manifest_path: data/manifests/transistor.csv
   image_size: 224
   val_split: 0.3
   seed: 42
@@ -27,10 +27,11 @@ anomaly_detection:
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
-  # Leather images are a close-up of a texture that fills the entire frame
-  # (no discrete object vs. plain background, unlike screw/hazelnut) -- same
-  # situation as bottle/carpet, so disable foreground masking; see README
-  # "Generalization to Other Categories".
+  # Transistor is a discrete object like screw/hazelnut, but its background
+  # (a perforated copper board) is a busy, non-uniform pattern rather than a
+  # plain surface -- the Otsu foreground mask assumes a plain background, so
+  # it would also pick up the board's holes as "foreground". Disable masking
+  # here; see README "Generalization to Other Categories".
   use_foreground_mask: false
 
 output:

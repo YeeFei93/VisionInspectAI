@@ -1,73 +1,5 @@
 # VisionInspectAI
-Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, `carpet`, and `leather`; the Streamlit demo auto-detects which one was uploaded.
-
-## Getting Started (New Clone Setup)
-
-These steps take a fresh clone from zero to a running Streamlit demo. **Note:** the raw MVTec-AD dataset, trained model checkpoints (`models/checkpoints/`) and generated outputs (`outputs/`) are all excluded via `.gitignore` (too large for git) — only source code and the small `data/manifests/*.csv` files are tracked, so you need to download the dataset and (re)train the models yourself after cloning.
-
-### 1. Clone and set up a Python environment
-
-```bash
-git clone <this-repo-url>
-cd VisionInspectAI
-
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-
-pip install -r requirement.txt
-```
-
-Requires Python 3.9+.
-
-### 2. Download the MVTec-AD dataset
-
-Download the dataset from the official [MVTec-AD page](https://www.mvtec.com/company/research/datasets/mvtec-ad) (free for research/non-commercial use — see `data/mvtec_anomaly_detection/license.txt`) and extract it so the folder layout looks like:
-
-```
-data/mvtec_anomaly_detection/
-	<category>/
-		train/good/...
-		test/<defect_type or good>/...
-		ground_truth/<defect_type>/...
-```
-
-At minimum, grab the categories this project is already configured for: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`. (You only need the top-level dataset archive, or the individual per-category archives for just those five.)
-
-### 3. Build manifests, train the models, and launch the demo
-
-Repeat for each category (`screw`, `bottle`, `hazelnut`, `carpet`, `leather`):
-
-```bash
-python -m src.data.create_manifest --category screw
-python -m src.models.train_baseline --config config/screw_config.yaml
-python -m src.models.run_anomaly_detection --config config/screw_config.yaml
-```
-
-Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all five manifests exist:
-
-```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather
-```
-
-Optionally, train each category's defect-type classifier (needed for the Streamlit demo to show *what kind* of defect was found, not just Normal/Defective):
-
-```bash
-python -m src.models.train_defect_classifier --config config/screw_config.yaml
-```
-
-Finally, launch the demo:
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-### 4. Verify everything works
-
-```bash
-python -m pytest tests/ -v
-```
-
-See [Quick Start](#quick-start) below for the condensed command list and [Pipeline Steps in Detail](#pipeline-steps-in-detail) for what each script/output actually is.
+Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, and `carpet`; the Streamlit demo auto-detects which one was uploaded.
 
 ## Learning & Techniques Involved
 
@@ -115,13 +47,10 @@ python -m src.models.train_baseline --config config/screw_config.yaml
 # 3. Train and evaluate the unsupervised PatchCore anomaly detector
 python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 
-# 4. (optional) Train the per-category defect-type classifier (what kind of defect is it?)
-python -m src.models.train_defect_classifier --config config/screw_config.yaml
-
-# 5. Launch the interactive demo (auto-detects the category from the uploaded image)
+# 4. Launch the interactive demo (auto-detects the category from the uploaded image)
 streamlit run app/streamlit_app.py
 
-# 6. Run the unit tests
+# 5. Run the unit tests
 python -m pytest tests/ -v
 ```
 
@@ -242,10 +171,10 @@ unsupervised anomaly localization.
 
 To compare baseline classifier architectures, point `train_baseline.py` at any of `config/screw_config.yaml` (ResNet18), `config/screw_config_efficientnet_b0.yaml`, or `config/screw_config_simple_cnn.yaml` — each writes its own checkpoint/metrics file so results don't overwrite each other.
 
-To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
+To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
 
 ```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather <new_category>
+python -m src.models.train_category_classifier --categories screw bottle hazelnut <new_category>
 ```
 
 ## Pipeline Steps in Detail
@@ -306,41 +235,26 @@ Trained with cross-entropy loss and the Adam optimizer for `train.epochs` epochs
 - `models/checkpoints/category_classifier_resnet18.pt` — model state dict.
 - `outputs/metrics/category_classifier_metrics.json` — the ordered category list (defines the label→name mapping), validation accuracy, and confusion matrix.
 
-### Step 5 — Train the defect-type classifier (per category)
-
-**Script:** [src/models/train_defect_classifier.py](src/models/train_defect_classifier.py).
-
-**What it does:** unlike the Step 2 good/defective classifier, this only looks at a single category's *defective* test/ rows and predicts which `defect_type` it is (e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`), on a stratified train/val split over just those defect types.
-
-**Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for 10 epochs.
-
-**Output** (named `defect_classifier_<architecture>_<category>`):
-- `models/checkpoints/defect_classifier_<architecture>_<category>.pt` — model state dict.
-- `outputs/metrics/defect_classifier_<architecture>_<category>_metrics.json` — the ordered defect-type list (defines the label→name mapping), validation accuracy, and confusion matrix.
-
-This is optional per category — the Streamlit demo checks whether a checkpoint/metrics file exists for the detected category and simply skips the defect-type display (with a hint to train it) if not.
-
-### Step 6 — Launch the interactive Streamlit demo
+### Step 5 — Launch the interactive Streamlit demo
 
 **Script:** [app/streamlit_app.py](app/streamlit_app.py).
 
 **What it does, end to end, for an uploaded image:**
-1. Runs the Step 4 category classifier to auto-detect the object type (`screw`/`bottle`/`hazelnut`/`carpet`/`leather`), with a collapsed manual-override dropdown as a fallback.
+1. Runs the Step 4 category classifier to auto-detect the object type (`screw`/`bottle`/`hazelnut`/`carpet`), with a collapsed manual-override dropdown as a fallback.
 2. Loads that category's config, PatchCore memory bank (Step 3 checkpoint) and metrics file (for the decision threshold).
-3. Computes the Otsu foreground mask (`compute_foreground_mask`) unless the category's config sets `use_foreground_mask: false` (full-frame textures like `bottle`/`carpet`/`leather`).
+3. Computes the Otsu foreground mask (`compute_foreground_mask`) unless the category's config sets `use_foreground_mask: false` (full-frame textures like `bottle`/`carpet`).
 4. Runs `PatchCoreAnomalyDetector.predict` to get the image anomaly score and pixel-level anomaly map.
 5. Turns the score into a **Normal / Defective** verdict by comparing against the stored Youden threshold.
 6. Buckets a "Defective" verdict into **Low / Medium / High severity** (`classify_severity`) based on what *fraction of the object's foreground area* is above the threshold, not just the raw score.
-7. If "Defective" and a Step 5 defect-type classifier exists for the category, runs it to show the predicted **defect type** and its confidence alongside the verdict.
-8. Builds a threshold-anchored jet-colormap heatmap and image+heatmap overlay (`make_overlay` / `normalize_map_threshold`) so warm colors visually agree with the Normal/Defective decision.
+7. Builds a threshold-anchored jet-colormap heatmap and image+heatmap overlay (`make_overlay` / `normalize_map_threshold`) so warm colors visually agree with the Normal/Defective decision.
 
-**Output:** an interactive UI showing the original image, the anomaly heatmap, and the overlay side by side, plus Prediction / Anomaly score / Severity / (optional) Defect type metrics — nothing is persisted to disk (aside from Streamlit's in-memory model cache).
+**Output:** an interactive UI showing the original image, the anomaly heatmap, and the overlay side by side, plus Prediction / Anomaly score / Severity metrics — nothing is persisted to disk (aside from Streamlit's in-memory model cache).
 
-### Step 7 (optional) — Fuse the classifier and PatchCore into a hybrid ensemble
+### Step 6 (optional) — Fuse the classifier and PatchCore into a hybrid ensemble
 
 **Script:** [src/models/run_ensemble.py](src/models/run_ensemble.py) — see [Hybrid Ensemble](#hybrid-ensemble-fusing-the-classifier-and-patchcore) below for the full write-up, algorithm (weighted-average score fusion) and output (`outputs/metrics/ensemble_<architecture>_<category>_metrics.json`).
 
-### Step 8 — Run the unit tests
+### Step 7 — Run the unit tests
 
 **Command:** `python -m pytest tests/ -v`
 
@@ -395,37 +309,22 @@ python -m src.models.run_ensemble --config config/screw_config.yaml --classifier
 
 ## Generalization to Other Categories
 
-The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was run end-to-end on four more MVTec-AD categories, picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), `carpet` (a close-up textile texture filling the whole frame, no discrete object at all), and `leather` (another close-up, full-frame texture, same situation as carpet).
+The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was run end-to-end on three more MVTec-AD categories, picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), and `carpet` (a close-up textile texture filling the whole frame, no discrete object at all).
 
 | Category | Classifier val accuracy/F1 | PatchCore image ROC-AUC | PatchCore pixel ROC-AUC | Mean IoU | Mean Dice |
 |---|---|---|---|---|---|
 | Screw | 1.00 / 1.00 | 0.909 | 0.976 | 0.047 | 0.088 |
 | Bottle | 0.88 / 0.92 | 1.000 | 0.981 | 0.397 | 0.550 |
 | Hazelnut | 1.00 / 1.00 | 0.998 | 0.970 | 0.209 | 0.320 |
-| Carpet | 0.92 / 0.94 | 0.971 | 0.987 | 0.251 | 0.372 |
-| Leather | 1.00 / 1.00 | 1.000 | **0.991** | 0.127 | 0.210 |
+| Carpet | 0.92 / 0.94 | 0.971 | **0.987** | 0.251 | 0.372 |
 
 **Finding — the classifier's "perfect scores" issue isn't universal.** Unlike screw and hazelnut, the bottle classifier scored a believable 0.88 accuracy / 0.92 F1, not 1.0 (its held-out val subset is smaller — only 25 images — and the defects are more subtle). This is a useful counter-example confirming that the earlier "misleadingly perfect" finding is specifically a symptom of the *screw* dataset being small/easy, not a bug in the evaluation code.
 
 **Finding — the foreground-masking heuristic doesn't generalize automatically, and blindly applying it can actively hurt localization.** The Otsu-based foreground mask ([src/preprocessing/segmentation.py](src/preprocessing/segmentation.py)) assumes a plain background with the object as the minority of pixels — true for screw and hazelnut, but **false for bottle**, whose images are a top-down shot where the bottle mouth fills the entire frame. Applying it anyway made bottle's pixel-level ROC-AUC **worse than random (0.374)**: Otsu split the frame into the dark inner bottle opening vs. the lighter rim, and incorrectly zeroed out real defect pixels that happened to fall inside the dark "background" region. Adding a `use_foreground_mask: false` toggle to `bottle_config.yaml` (and threading it through [run_anomaly_detection.py](src/models/run_anomaly_detection.py) and the Streamlit app) fixed it immediately: pixel ROC-AUC jumped to 0.981 and mean IoU/Dice became the *best* of screw/bottle/hazelnut (0.40 / 0.55) — confirmed visually, the predicted heatmap now matches the crescent-shaped ground-truth defect almost exactly. **Lesson:** any hand-crafted heuristic derived from one category's visual layout should be treated as a per-category, config-driven option, not a hardcoded assumption — and always sanity-check pixel-level metrics per category rather than assuming an improvement that helped one category will help (or even be neutral for) another.
 
-**Applying the lesson upfront — `carpet` and `leather`.** Both are full-frame textures just like `bottle` (no discrete object vs. background), so their configs were created with `use_foreground_mask: false` from the start instead of discovering the problem the hard way again. Result: carpet got the best pixel-level ROC-AUC of the first four categories (0.987), and leather pushed that further to **0.991** — the best of all five categories — on the first run each time, concrete evidence that the earlier fix generalized into a repeatable, config-driven decision rather than a one-off patch. Leather's mean IoU/Dice (0.127 / 0.210) are lower than carpet's, though — a reminder that pixel ROC-AUC (ranking) and IoU/Dice (tight overlap) are still independent axes even within the same `use_foreground_mask: false` texture group (see the IoU/Dice lesson below).
+**Applying the lesson upfront — `carpet`.** `carpet` is a full-frame texture just like `bottle` (no discrete object vs. background), so `carpet_config.yaml` was created with `use_foreground_mask: false` from the start instead of discovering the problem the hard way again. Result: the *best* pixel-level ROC-AUC of all four categories (0.987) and solid IoU/Dice (0.251 / 0.372), on the first run — concrete evidence that the earlier fix generalized into a repeatable, config-driven decision rather than a one-off patch.
 
-The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category at all: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a small ResNet18 classifier to recognize the object type itself (all five categories are visually distinct enough that it hits 100% validation accuracy, even with carpet and leather added), and the app runs it first on the uploaded image to auto-detect the category, then routes to that category's PatchCore detector automatically — with a collapsed "override" dropdown as a manual fallback if it's ever wrong. Adding a new category only requires a new `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` plus retraining the category classifier with it included.
-
-## Defect-Type Classification (per category)
-
-Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.py](src/models/train_defect_classifier.py) trains a per-category, multi-class classifier over each category's own `defect_type` labels (defective images only, see [Step 5](#step-5--train-the-defect-type-classifier-per-category)), and [app/streamlit_app.py](app/streamlit_app.py) shows the predicted defect type + confidence whenever a "Defective" verdict is reached and a matching checkpoint exists.
-
-| Category | Defect types | Train / val images | Val accuracy |
-|---|---|---|---|
-| Screw | manipulated_front, scratch_head, scratch_neck, thread_side, thread_top (5) | 83 / 36 | 0.444 |
-| Bottle | broken_large, broken_small, contamination (3) | 44 / 19 | 0.789 |
-| Hazelnut | crack, cut, hole, print (4) | 49 / 21 | 0.857 |
-| Carpet | color, cut, hole, metal_contamination, thread (5) | 62 / 27 | 0.815 |
-| Leather | color, cut, fold, glue, poke (5) | 64 / 28 | **0.964** |
-
-**Finding — fine-grained defect-type accuracy tracks per-class sample count, not just class count.** Screw and leather both have 5 defect types, yet screw's val accuracy (0.444) is by far the worst of the five categories while leather's (0.964) is the best. Screw's confusion matrix shows `thread_side` and `thread_top` absorbing most of the misclassifications from the other three classes (`[[2,0,0,5,0],[0,5,0,2,0],[0,1,1,5,1],[0,0,0,6,1],[0,0,0,5,2]]`) — with only 83 train images spread over 5 classes (~16–17 images/class), and screw's defect types being subtle, visually-similar deviations on the same small grey object (a scratch on the head vs. the neck, thread wear on one side vs. the top), there's neither enough data nor enough visual separation for the model to tell them apart reliably. Leather's defect types, by contrast, are visually distinct surface phenomena (a color blotch vs. a cut vs. a glue smear) despite a similarly small dataset (64 train images), so it reaches near-perfect accuracy. **Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are — screw is a case where more data alone likely wouldn't fully fix it without also addressing the inherent visual similarity between its defect types.
+The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category at all: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a small ResNet18 classifier to recognize the object type itself (all four categories are visually distinct enough that it hits 100% validation accuracy, even with carpet added), and the app runs it first on the uploaded image to auto-detect the category, then routes to that category's PatchCore detector automatically — with a collapsed "override" dropdown as a manual fallback if it's ever wrong. Adding a new category only requires a new `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` plus retraining the category classifier with it included.
 
 ## Notes & Lessons Learned
 
@@ -440,9 +339,6 @@ Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.
 - **A plain min-max colored heatmap doesn't visually match the actual decision boundary.** Even with background masked out, ordinary (sub-threshold) screw texture — like normal thread ridges — still has a non-zero, spatially-varying anomaly score, so a full-range jet colormap can render it yellow/green and look like "a big defect" even when the real decision (score vs. the calibrated threshold) says otherwise. Anchoring the colormap to the decision threshold (`normalize_map_threshold` in [src/visualization/heatmap.py](src/visualization/heatmap.py)) — compressing below-threshold values into the cool half and only letting above-threshold values read as hot — makes the heatmap visually agree with the Normal/Defective/severity verdict.
 - **`matplotlib.imshow` silently re-normalizes data unless you pass `vmin`/`vmax`.** After pre-compressing anomaly values into a threshold-anchored `[0, 1]` range, `axes.imshow(normalized, cmap="jet")` was auto-rescaling that already-compressed range back to the full colormap, quietly undoing the fix for one figure panel. Any time you pass pre-normalized data to `imshow`, pass `vmin=0, vmax=1` explicitly or matplotlib will stretch contrast based on the data's own min/max.
 - **A vision heuristic tuned on one category can silently break another.** The foreground-masking fix that helped `screw` (and generalized fine to `hazelnut`) made `bottle`'s pixel-level localization *worse than random* until it was made a per-category, config-driven toggle instead of an always-on assumption — see [Generalization to Other Categories](#generalization-to-other-categories) above. Multi-category testing caught this; single-category testing would not have.
-- **Recognizing the object type is a much easier task than recognizing its defects.** The category classifier ([src/models/train_category_classifier.py](src/models/train_category_classifier.py)) hits 100% validation accuracy telling screw/bottle/hazelnut/carpet/leather apart, in contrast to the earlier "misleadingly perfect" good-vs-defective classifier finding. This is expected and not a red flag the same way: whole object types differ enormously in shape/texture/color (an easy, well-separated classification problem), while a defect is a subtle local deviation within one object type (a hard, fine-grained problem) — a perfect score means something very different depending on which of the two problems is being solved.
-- **A lesson learned from one category, once turned into a config option, actually transfers.** Adding `carpet` and then `leather` (both full-frame textures like `bottle`) with `use_foreground_mask: false` set from the start — instead of rediscovering the problem — produced the best pixel-level ROC-AUC so far each time (carpet 0.987, then leather 0.991). Turning a bug fix into an explicit, per-category config decision (rather than just patching the one case that broke) is what makes a lesson actually reusable on the next category.
+- **Recognizing the object type is a much easier task than recognizing its defects.** The category classifier ([src/models/train_category_classifier.py](src/models/train_category_classifier.py)) hits 100% validation accuracy telling screw/bottle/hazelnut/carpet apart, in contrast to the earlier "misleadingly perfect" good-vs-defective classifier finding. This is expected and not a red flag the same way: whole object types differ enormously in shape/texture/color (an easy, well-separated classification problem), while a defect is a subtle local deviation within one object type (a hard, fine-grained problem) — a perfect score means something very different depending on which of the two problems is being solved.
+- **A lesson learned from one category, once turned into a config option, actually transfers.** Adding `carpet` (another full-frame texture like `bottle`) with `use_foreground_mask: false` set from the start — instead of rediscovering the problem — produced the best pixel-level ROC-AUC of all four categories on the first attempt. Turning a bug fix into an explicit, per-category config decision (rather than just patching the one case that broke) is what makes a lesson actually reusable on the next category.
 - **A from-scratch CNN needs far more training than a pretrained backbone on a small dataset.** Adding a `simple_cnn` option (small sequential CNN, no pretrained weights) to [src/models/baseline_classifier.py](src/models/baseline_classifier.py) and training it side-by-side with ResNet18/EfficientNet-B0 on the same 112 images/10 epochs showed all three reach the same (misleadingly perfect) validation score, but their training loss tells a very different story: ResNet18/EfficientNet-B0 converge to ~0.01–0.04 while the from-scratch CNN is still at ~0.17. When validation metrics saturate/tie across models (often a sign the eval set is too small or too easy), check the training loss curve too — it can reveal a real gap that accuracy alone hides.
-- **`torch.cuda.is_available()` alone misses Apple Silicon GPUs.** The training scripts ([train_baseline.py](src/models/train_baseline.py), [train_category_classifier.py](src/models/train_category_classifier.py), [run_anomaly_detection.py](src/models/run_anomaly_detection.py)) only checked for CUDA and silently fell back to CPU on this Mac, even though `torch.backends.mps.is_available()` was `True`. Adding an explicit `cuda` → `mps` → `cpu` fallback let the category classifier retrain (1631 images, 8 epochs) run on the Apple Silicon GPU instead of CPU with no code/behavior change beyond speed. Always check for `mps` explicitly on Apple Silicon — `cuda.is_available()` being `False` doesn't mean no GPU is available.
-- **A fine-grained per-category defect-type classifier is a fundamentally harder problem than the coarse good/defective or category classifiers, and doesn't automatically inherit their near-perfect scores.** See [Defect-Type Classification](#defect-type-classification-per-category) above: screw scored only 0.444 validation accuracy across its 5 defect types (~16–17 train images/class, and the defect types are subtle geometric variations of each other) while leather scored 0.964 with a similar amount of data but visually distinct defect types. Class count and dataset size alone don't predict fine-grained accuracy — inter-class visual similarity matters just as much, and should be checked per category rather than assumed to generalize from one category's result.
-- **A high anomaly score on an unfamiliar photo is domain shift, not overfitting — and the two need different evidence.** Testing the hazelnut PatchCore detector on real held-out MVTec test images it never trained on cleanly separates good (scores 2.20–2.39) from defective (2.88–3.45) around its 2.618 threshold, confirming it generalizes fine *within its training distribution* (consistent with the 0.998 image ROC-AUC reported above). Feeding it two web images instead — a glossy stock-photo hazelnut on a transparent background (score 3.68, "Defective") and an unrelated peach that the category classifier only weakly matched to hazelnut at 60% confidence (score 4.05, "Defective") — both scored *above* every real defective test image. PatchCore is a memory-bank method: it has no notion of "same object, different defect" vs. "different lighting/background/object entirely" — both simply read as "far from anything memorized." The fix isn't more training, it's recognizing that image-space generalization (unseen defects on the *same* capture setup) and domain generalization (unseen capture conditions or object types) are different questions, and this project's ROC-AUC numbers only speak to the former.

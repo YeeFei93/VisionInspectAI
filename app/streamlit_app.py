@@ -29,8 +29,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))  # allow `import src...` when run via `streamlit run`
 
-from src.models.anomaly_detector import PatchCoreAnomalyDetector  # noqa: E402
+from src.models.anomaly_detector import (  # noqa: E402
+    PatchCoreAnomalyDetector,
+    scoring_artifact_suffix,
+)
 from src.models.baseline_classifier import build_baseline_model  # noqa: E402
+from src.preprocessing.defect_crop import crop_to_defect  # noqa: E402
 from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
 from src.visualization.heatmap import make_overlay  # noqa: E402
@@ -45,6 +49,7 @@ CATEGORY_CONFIGS = {
     "hazelnut": PROJECT_ROOT / "config" / "hazelnut_config.yaml",
     "carpet": PROJECT_ROOT / "config" / "carpet_config.yaml",
     "leather": PROJECT_ROOT / "config" / "leather_config.yaml",
+    "transistor": PROJECT_ROOT / "config" / "transistor_config.yaml",
     "grid": PROJECT_ROOT / "config" / "grid_config.yaml",
     "tile": PROJECT_ROOT / "config" / "tile_config.yaml",
     "wood": PROJECT_ROOT / "config" / "wood_config.yaml",
@@ -133,6 +138,9 @@ def load_detector(category: str, _config: dict) -> PatchCoreAnomalyDetector:
         backbone=anomaly_cfg["backbone"],
         layers=tuple(anomaly_cfg["layers"]),
         device="cpu",
+        num_neighbors=anomaly_cfg.get("num_neighbors", 1),
+        softmax_reweighting=anomaly_cfg.get("softmax_reweighting", False),
+        reweight_num_neighbors=anomaly_cfg.get("reweight_num_neighbors", 9),
     )
     detector.load(checkpoint_path)
     return detector
@@ -142,6 +150,11 @@ def load_detector(category: str, _config: dict) -> PatchCoreAnomalyDetector:
 def load_metrics(category: str, _config: dict) -> dict:
     anomaly_cfg = _config["anomaly_detection"]
     run_name = f"patchcore_{anomaly_cfg['backbone']}_{category}"
+    run_name += scoring_artifact_suffix(
+        anomaly_cfg.get("num_neighbors", 1),
+        anomaly_cfg.get("softmax_reweighting", False),
+        anomaly_cfg.get("reweight_num_neighbors", 9),
+    )
     metrics_path = PROJECT_ROOT / _config["output"]["metrics_dir"] / f"{run_name}_metrics.json"
 
     if not metrics_path.exists():
@@ -158,27 +171,41 @@ def load_metrics(category: str, _config: dict) -> dict:
 @st.cache_resource
 def load_defect_classifier(category: str, _config: dict):
     """Load the per-category "what kind of defect is this?" classifier (see
-    src/models/train_defect_classifier.py). Returns (model, defect_types), or
-    (None, None) if it hasn't been trained yet for this category — the
+    src/models/train_defect_classifier.py). Returns (model, defect_types,
+    metadata), or (None, None, None) if it hasn't been trained — the
     defect-type breakdown is an optional add-on, not required for the
     Normal/Defective verdict."""
     model_cfg = _config["model"]
-    run_name = f"defect_classifier_{model_cfg['architecture']}_{category}"
-    checkpoint_path = PROJECT_ROOT / _config["output"]["checkpoint_dir"] / f"{run_name}.pt"
-    metrics_path = PROJECT_ROOT / _config["output"]["metrics_dir"] / f"{run_name}_metrics.json"
+    base_name = f"defect_classifier_{model_cfg['architecture']}_{category}"
+    checkpoint_dir = PROJECT_ROOT / _config["output"]["checkpoint_dir"]
+    metrics_dir = PROJECT_ROOT / _config["output"]["metrics_dir"]
+    focused_cfg = _config.get("defect_classifier", {})
+    use_focused_crops = focused_cfg.get("use_focused_crops", False)
+    run_name = base_name
+    if use_focused_crops:
+        run_name += "_focused"
+        if focused_cfg.get("crop_source") == "patchcore":
+            run_name += "_patchcore"
+    checkpoint_path = checkpoint_dir / f"{run_name}.pt"
+    metrics_path = metrics_dir / f"{run_name}_metrics.json"
+
+    if use_focused_crops and (not checkpoint_path.exists() or not metrics_path.exists()):
+        checkpoint_path = checkpoint_dir / f"{base_name}.pt"
+        metrics_path = metrics_dir / f"{base_name}_metrics.json"
 
     if not checkpoint_path.exists() or not metrics_path.exists():
-        return None, None
+        return None, None, None
 
     with metrics_path.open() as f:
-        defect_types = json.load(f)["defect_types"]
+        metadata = json.load(f)
+        defect_types = metadata["defect_types"]
 
     model = build_baseline_model(
         architecture=model_cfg["architecture"], num_classes=len(defect_types), pretrained=False
     )
     model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
     model.eval()
-    return model, defect_types
+    return model, defect_types, metadata
 
 
 def detect_defect_type(model, defect_types, input_tensor: torch.Tensor):
@@ -254,6 +281,7 @@ def main() -> None:
     metrics = load_metrics(category, config)
 
     threshold = metrics["threshold"]
+    pixel_threshold = metrics.get("pixel_threshold", threshold)
     image_size = config["data"]["image_size"]
     use_foreground_mask = config["anomaly_detection"].get("use_foreground_mask", True)
     transform = get_val_transforms(image_size)
@@ -279,9 +307,24 @@ def main() -> None:
 
     defect_type, defect_confidence = None, None
     if prediction == "Defective":
-        defect_model, defect_types = load_defect_classifier(category, config)
+        defect_model, defect_types, defect_metadata = load_defect_classifier(category, config)
         if defect_model is not None:
-            defect_type, defect_confidence, _ = detect_defect_type(defect_model, defect_types, input_tensor)
+            defect_input = input_tensor
+            if defect_metadata.get("crop_mode") == "defect_focused":
+                predicted_defect_mask = np.logical_and(
+                    result.anomaly_map.detach().cpu().numpy() >= pixel_threshold,
+                    foreground_mask,
+                )
+                defect_image = crop_to_defect(
+                    original_image,
+                    predicted_defect_mask,
+                    padding_ratio=defect_metadata.get("crop_padding_ratio", 0.25),
+                    min_crop_fraction=defect_metadata.get("min_crop_fraction", 0.25),
+                )
+                defect_input = transform(defect_image).unsqueeze(0)
+            defect_type, defect_confidence, _ = detect_defect_type(
+                defect_model, defect_types, defect_input
+            )
             if not should_make_prediction(defect_confidence):
                 defect_type = None
                 defect_confidence = None

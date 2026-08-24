@@ -26,17 +26,76 @@ from src.evaluation.metrics import (
     compute_pixel_level_metrics,
     youden_threshold,
 )
-from src.models.anomaly_detector import PatchCoreAnomalyDetector
+from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
 from src.preprocessing.segmentation import compute_foreground_mask
 from src.preprocessing.transform import get_val_transforms
 from src.visualization.heatmap import save_anomaly_heatmap
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MAX_CORESET_SIZE = 2000
+DEFAULT_PROJECTION_DIM = 128
+DEFAULT_LAYERS = ("layer2", "layer3")
+DEFAULT_NUM_NEIGHBORS = 1
+DEFAULT_REWEIGHT_NUM_NEIGHBORS = 9
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config/screw_config.yaml"))
+    parser.add_argument(
+        "--projection-method",
+        choices=("random", "pca"),
+        default=None,
+        help="Override anomaly_detection.projection_method from the config.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Override the coreset/PCA seed and include it in the artifact name.",
+    )
+    parser.add_argument(
+        "--metrics-only",
+        action="store_true",
+        help="Save metrics but skip the memory-bank checkpoint and example heatmaps.",
+    )
+    parser.add_argument(
+        "--max-coreset-size",
+        type=int,
+        default=None,
+        help="Override anomaly_detection.max_coreset_size.",
+    )
+    parser.add_argument(
+        "--projection-dim",
+        type=int,
+        default=None,
+        help="Override anomaly_detection.projection_dim.",
+    )
+    parser.add_argument(
+        "--layers",
+        nargs="+",
+        choices=("layer1", "layer2", "layer3", "layer4"),
+        default=None,
+        help="Override anomaly_detection.layers, for example --layers layer2 layer3.",
+    )
+    parser.add_argument(
+        "--num-neighbors",
+        type=int,
+        default=None,
+        help="Average this many nearest memory distances per patch (default: 1).",
+    )
+    parser.add_argument(
+        "--softmax-reweighting",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable PatchCore neighborhood softmax image-score reweighting.",
+    )
+    parser.add_argument(
+        "--reweight-num-neighbors",
+        type=int,
+        default=None,
+        help="Memory neighborhood size for softmax reweighting (default: 9).",
+    )
     return parser.parse_args()
 
 
@@ -52,6 +111,44 @@ def load_gt_mask(mask_path, image_size: int) -> np.ndarray:
         return np.zeros((image_size, image_size), dtype=np.uint8)
     mask_img = Image.open(mask_path).convert("L").resize((image_size, image_size), Image.NEAREST)
     return (np.array(mask_img) > 127).astype(np.uint8)
+
+
+def build_run_name(
+    backbone: str,
+    category: str,
+    projection_method: str,
+    seed: int,
+    args: argparse.Namespace,
+    include_seed: bool = False,
+    max_coreset_size: int = DEFAULT_MAX_CORESET_SIZE,
+    projection_dim: int = DEFAULT_PROJECTION_DIM,
+    layers: tuple = DEFAULT_LAYERS,
+    num_neighbors: int = DEFAULT_NUM_NEIGHBORS,
+    softmax_reweighting: bool = False,
+    reweight_num_neighbors: int = DEFAULT_REWEIGHT_NUM_NEIGHBORS,
+) -> str:
+    effective_coreset_size = (
+        args.max_coreset_size if args.max_coreset_size is not None else max_coreset_size
+    )
+    effective_projection_dim = (
+        args.projection_dim if args.projection_dim is not None else projection_dim
+    )
+    effective_layers = tuple(args.layers) if args.layers is not None else layers
+    run_name = f"patchcore_{backbone}_{category}"
+    if projection_method != "random":
+        run_name += f"_{projection_method}proj"
+    if args.seed is not None or include_seed:
+        run_name += f"_seed{seed}"
+    if effective_coreset_size != DEFAULT_MAX_CORESET_SIZE:
+        run_name += f"_cs{effective_coreset_size}"
+    if effective_projection_dim != DEFAULT_PROJECTION_DIM:
+        run_name += f"_pd{effective_projection_dim}"
+    if effective_layers != DEFAULT_LAYERS:
+        run_name += f"_{'-'.join(effective_layers)}"
+    run_name += scoring_artifact_suffix(
+        num_neighbors, softmax_reweighting, reweight_num_neighbors
+    )
+    return run_name
 
 
 def main() -> None:
@@ -79,13 +176,62 @@ def main() -> None:
         else "cpu"
     )
     print(f"Using device: {device}")
+    projection_method = args.projection_method or anomaly_cfg.get("projection_method", "random")
+    seed = args.seed if args.seed is not None else anomaly_cfg.get("seed", data_cfg["seed"])
+    max_coreset_size = (
+        args.max_coreset_size
+        if args.max_coreset_size is not None
+        else anomaly_cfg["max_coreset_size"]
+    )
+    projection_dim = (
+        args.projection_dim
+        if args.projection_dim is not None
+        else anomaly_cfg["projection_dim"]
+    )
+    layers = tuple(args.layers or anomaly_cfg["layers"])
+    num_neighbors = (
+        args.num_neighbors
+        if args.num_neighbors is not None
+        else anomaly_cfg.get("num_neighbors", DEFAULT_NUM_NEIGHBORS)
+    )
+    softmax_reweighting = (
+        args.softmax_reweighting
+        if args.softmax_reweighting is not None
+        else anomaly_cfg.get("softmax_reweighting", False)
+    )
+    reweight_num_neighbors = (
+        args.reweight_num_neighbors
+        if args.reweight_num_neighbors is not None
+        else anomaly_cfg.get(
+            "reweight_num_neighbors", DEFAULT_REWEIGHT_NUM_NEIGHBORS
+        )
+    )
+    if max_coreset_size <= 0:
+        raise ValueError("max_coreset_size must be positive")
+    if projection_dim <= 0:
+        raise ValueError("projection_dim must be positive")
+    if num_neighbors <= 0:
+        raise ValueError("num_neighbors must be positive")
+    if reweight_num_neighbors <= 1:
+        raise ValueError("reweight_num_neighbors must be greater than 1")
+    print(
+        f"Coreset projection: {projection_method} | Seed: {seed} | "
+        f"Max coreset: {max_coreset_size} | Projection dim: {projection_dim} | "
+        f"Layers: {', '.join(layers)} | k-NN: {num_neighbors} | "
+        f"Softmax reweighting: {softmax_reweighting}"
+    )
     detector = PatchCoreAnomalyDetector(
         backbone=anomaly_cfg["backbone"],
-        layers=tuple(anomaly_cfg["layers"]),
+        layers=layers,
         coreset_ratio=anomaly_cfg["coreset_ratio"],
-        max_coreset_size=anomaly_cfg["max_coreset_size"],
-        projection_dim=anomaly_cfg["projection_dim"],
+        max_coreset_size=max_coreset_size,
+        projection_dim=projection_dim,
         device=device,
+        seed=seed,
+        projection_method=projection_method,
+        num_neighbors=num_neighbors,
+        softmax_reweighting=softmax_reweighting,
+        reweight_num_neighbors=reweight_num_neighbors,
     )
 
     print(f"Fitting PatchCore memory bank on {len(train_dataset)} train/good images...")
@@ -121,6 +267,15 @@ def main() -> None:
     metrics["threshold"] = float(threshold)
     metrics["score_min"] = float(scores_arr.min())
     metrics["score_max"] = float(scores_arr.max())
+    metrics["projection_method"] = projection_method
+    metrics["seed"] = seed
+    metrics["max_coreset_size"] = max_coreset_size
+    metrics["memory_bank_size"] = int(detector.memory_bank.shape[0])
+    metrics["projection_dim"] = projection_dim
+    metrics["layers"] = list(layers)
+    metrics["num_neighbors"] = num_neighbors
+    metrics["softmax_reweighting"] = softmax_reweighting
+    metrics["reweight_num_neighbors"] = reweight_num_neighbors
 
     print(f"Image-level ROC-AUC: {auroc:.4f}")
     print(f"Chosen threshold (Youden's J): {threshold:.4f}")
@@ -149,9 +304,27 @@ def main() -> None:
     for directory in (checkpoint_dir, metrics_dir, heatmaps_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    run_name = f"patchcore_{anomaly_cfg['backbone']}_{category}"
-    detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
+    run_name = build_run_name(
+        anomaly_cfg["backbone"],
+        category,
+        projection_method,
+        seed,
+        args,
+        include_seed="seed" in anomaly_cfg,
+        max_coreset_size=max_coreset_size,
+        projection_dim=projection_dim,
+        layers=layers,
+        num_neighbors=num_neighbors,
+        softmax_reweighting=softmax_reweighting,
+        reweight_num_neighbors=reweight_num_neighbors,
+    )
+    if not args.metrics_only:
+        detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    if args.metrics_only:
+        print(f"Saved metrics to {metrics_dir / f'{run_name}_metrics.json'}")
+        return
 
     # Save one example heatmap per defect type (plus "good") for a qualitative check.
     # Colors are anchored to the same image-level threshold used for the printed

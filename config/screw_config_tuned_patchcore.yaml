@@ -7,7 +7,7 @@ data:
   seed: 42
 
 model:
-  architecture: resnet18   # resnet18 or efficientnet_b0
+  architecture: resnet18
   pretrained: true
   num_classes: 2
 
@@ -19,16 +19,12 @@ train:
   early_stopping_patience: 3
   early_stopping_min_delta: 0.0
 
-defect_classifier:
-  use_focused_crops: true
-  crop_source: patchcore
-
 anomaly_detection:
-  backbone: resnet18       # resnet18 or wide_resnet50_2
-  layers: [layer2, layer3]
+  backbone: resnet18
+  layers: [layer2]
   coreset_ratio: 0.1
-  max_coreset_size: 2000
-  projection_dim: 128
+  max_coreset_size: 4000
+  projection_dim: 256
   batch_size: 16
 
 output:

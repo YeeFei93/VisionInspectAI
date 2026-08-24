@@ -11,6 +11,9 @@ model:
   pretrained: true
   num_classes: 2
 
+defect_classifier:
+  use_focused_crops: false
+
 train:
   batch_size: 16
   epochs: 10

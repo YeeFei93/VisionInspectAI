@@ -9,10 +9,13 @@ both "good" and every defect type.
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 from PIL import Image
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
+
+from src.preprocessing.defect_crop import crop_to_defect
 
 
 class ManifestImageDataset(Dataset):
@@ -23,10 +26,16 @@ class ManifestImageDataset(Dataset):
         manifest: pd.DataFrame,
         data_root: Path,
         transform: Optional[Callable] = None,
+        focus_on_mask: bool = False,
+        crop_padding_ratio: float = 0.25,
+        min_crop_fraction: float = 0.25,
     ):
         self.manifest = manifest.reset_index(drop=True)
         self.data_root = Path(data_root)
         self.transform = transform
+        self.focus_on_mask = focus_on_mask
+        self.crop_padding_ratio = crop_padding_ratio
+        self.min_crop_fraction = min_crop_fraction
 
     def __len__(self) -> int:
         return len(self.manifest)
@@ -34,6 +43,23 @@ class ManifestImageDataset(Dataset):
     def __getitem__(self, idx: int):
         row = self.manifest.iloc[idx]
         image = Image.open(self.data_root / row["image_path"]).convert("RGB")
+        mask_path = row.get("mask_path", "")
+        focus_mask = row.get("focus_mask", None)
+        if self.focus_on_mask and isinstance(focus_mask, np.ndarray):
+            image = crop_to_defect(
+                image,
+                focus_mask,
+                padding_ratio=self.crop_padding_ratio,
+                min_crop_fraction=self.min_crop_fraction,
+            )
+        elif self.focus_on_mask and isinstance(mask_path, str) and mask_path:
+            mask = np.asarray(Image.open(self.data_root / mask_path).convert("L")) > 0
+            image = crop_to_defect(
+                image,
+                mask,
+                padding_ratio=self.crop_padding_ratio,
+                min_crop_fraction=self.min_crop_fraction,
+            )
         if self.transform is not None:
             image = self.transform(image)
         label = int(row["label"])
