@@ -6,10 +6,12 @@ pick a category manually, then routes to that category's PatchCore
 anomaly detector automatically.
 
 Combines every manifest listed in --categories (default: all configured in
-app/streamlit_app.py's CATEGORY_CONFIGS), using every row (train + test,
-regardless of good/defective) since object-type recognition doesn't care
-about defect status, and reuses ManifestImageDataset by treating the
-category index as the "label" column.
+app/streamlit_app.py's CATEGORY_CONFIGS), using every row regardless of
+good/defective status since object-type recognition doesn't care about
+defect status, and reuses ManifestImageDataset by treating the category
+index as the "label" column. Trains on the "train" split rows only and
+validates on the "test" split rows, so it never trains on the images
+reserved as the evaluation set for train_baseline.py / run_anomaly_detection.py.
 
 Usage:
     python -m src.models.train_category_classifier
@@ -26,7 +28,6 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.model_selection import train_test_split
 
 from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import compute_per_class_report, plot_training_curves
@@ -44,11 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--categories",
         nargs="+",
-        default=["screw", "bottle", "hazelnut", "carpet", "leather", "grid", "tile", "wood"],
+        default=["screw", "bottle", "hazelnut"],
         help="Categories to include (must each have data/manifests/<category>.csv).",
     )
     parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--val-split", type=float, default=0.2)
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=0.0001)
@@ -63,13 +63,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_combined_manifest(categories: list) -> pd.DataFrame:
-    """Concatenate every category's manifest, using every row (train +
-    test) and replacing the good/defective "label" with a category index."""
+    """Concatenate every category's manifest, keeping MVTec's own train/test
+    split column and replacing the good/defective "label" with a category
+    index. Training uses only the "train" rows so the "test" rows stay a
+    clean holdout, consistent with train_baseline.py / run_anomaly_detection.py."""
     categories = sorted(categories)
     frames = []
     for category in categories:
         manifest = load_manifest(PROJECT_ROOT / "data" / "manifests" / f"{category}.csv")
-        manifest = manifest[["image_path"]].copy()
+        manifest = manifest[["image_path", "split"]].copy()
         manifest["label"] = categories.index(category)
         frames.append(manifest)
     combined = pd.concat(frames, ignore_index=True)
@@ -117,13 +119,12 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     manifest, categories = build_combined_manifest(args.categories)
-    print(f"Categories (label order): {categories}")
-    print(f"Total images: {len(manifest)}")
+    print(f"Categories (label order): {categories}", flush=True)
+    print(f"Total images: {len(manifest)}", flush=True)
 
-    train_subset, val_subset = train_test_split(
-        manifest, test_size=args.val_split, random_state=args.seed, stratify=manifest["label"]
-    )
-    print(f"Train subset: {len(train_subset)} images | Val subset: {len(val_subset)} images")
+    train_subset = manifest[manifest["split"] == "train"].reset_index(drop=True)
+    val_subset = manifest[manifest["split"] == "test"].reset_index(drop=True)
+    print(f"Train subset: {len(train_subset)} images | Val subset: {len(val_subset)} images", flush=True)
 
     train_dataset = ManifestImageDataset(
         train_subset, PROJECT_ROOT, transform=get_train_transforms(args.image_size)
@@ -140,7 +141,7 @@ def main() -> None:
         else "mps" if torch.backends.mps.is_available()
         else "cpu"
     )
-    print(f"Using device: {device}")
+    print(f"Using device: {device}", flush=True)
     model = build_baseline_model(
         architecture="resnet18", num_classes=len(categories), pretrained=True
     ).to(device)
@@ -171,7 +172,8 @@ def main() -> None:
             f"Epoch {epoch}/{args.epochs} - "
             f"accuracy: {train_accuracy:.4f} - loss: {train_loss:.4f} - "
             f"val_accuracy: {val_accuracy:.4f} - val_loss: {val_loss:.4f} - "
-            f"learning_rate: {learning_rate:.4g}"
+            f"learning_rate: {learning_rate:.4g}",
+            flush=True,
         )
 
         if val_loss < best_val_loss:
@@ -182,7 +184,7 @@ def main() -> None:
         else:
             epochs_without_improvement += 1
             if args.early_stopping_patience > 0 and epochs_without_improvement >= args.early_stopping_patience:
-                print(f"Early stopping at epoch {epoch}; best epoch was {best_epoch}.")
+                print(f"Early stopping at epoch {epoch}; best epoch was {best_epoch}.", flush=True)
                 break
 
     model.load_state_dict(best_state)
@@ -191,10 +193,10 @@ def main() -> None:
     accuracy = accuracy_score(y_true, y_pred)
     cm = confusion_matrix(y_true, y_pred).tolist()
     per_class_report = compute_per_class_report(y_true, y_pred, categories)
-    print(f"Validation accuracy (best epoch restored): {accuracy:.4f}")
-    print(f"Confusion matrix (rows=true, cols=pred, order={categories}): {cm}")
-    print("Per-class report:")
-    print(json.dumps(per_class_report, indent=2))
+    print(f"Validation accuracy (best epoch restored): {accuracy:.4f}", flush=True)
+    print(f"Confusion matrix (rows=true, cols=pred, order={categories}): {cm}", flush=True)
+    print("Per-class report:", flush=True)
+    print(json.dumps(per_class_report, indent=2), flush=True)
 
     CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -219,9 +221,9 @@ def main() -> None:
     )
     plot_training_curves(history, output_path=FIGURE_PATH, title_prefix="Category classifier")
 
-    print(f"Saved checkpoint to {CHECKPOINT_PATH}")
-    print(f"Saved metrics to {METRICS_PATH}")
-    print(f"Saved training curves figure to {FIGURE_PATH}")
+    print(f"Saved checkpoint to {CHECKPOINT_PATH}", flush=True)
+    print(f"Saved metrics to {METRICS_PATH}", flush=True)
+    print(f"Saved training curves figure to {FIGURE_PATH}", flush=True)
 
 
 if __name__ == "__main__":

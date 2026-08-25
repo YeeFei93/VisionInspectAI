@@ -58,11 +58,6 @@ CATEGORY_CONFIGS = {
 CATEGORY_CLASSIFIER_CHECKPOINT = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
 CATEGORY_CLASSIFIER_METRICS = PROJECT_ROOT / "outputs" / "metrics" / "category_classifier_metrics.json"
 CATEGORY_CLASSIFIER_IMAGE_SIZE = 224
-CONFIDENCE_THRESHOLD = 0.60
-
-
-def should_make_prediction(confidence: float, threshold: float = CONFIDENCE_THRESHOLD) -> bool:
-    return confidence >= threshold
 
 
 @st.cache_resource
@@ -246,10 +241,7 @@ def main() -> None:
 
     uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
     if uploaded_file is None:
-        st.info(
-            "Upload a .png / .jpg image of one of the supported categories: "
-            f"{', '.join(sorted(known_categories))}."
-        )
+        st.info(f"Upload a .png / .jpg image of one of: {', '.join(sorted(known_categories))}.")
         return
 
     original_image = load_as_rgb(uploaded_file)
@@ -268,13 +260,6 @@ def main() -> None:
         category = st.selectbox("Category", options, index=options.index(detected_category))
     if category != detected_category:
         st.caption(f"Using manually selected category: **{category}**")
-
-    if not should_make_prediction(confidence):
-        st.warning(
-            "Category not found. Confidence is below 60%, so no prediction is shown for this image. "
-            "Please try another image or choose a category manually to continue."
-        )
-        return
 
     config = load_config(category)
     detector = load_detector(category, config)
@@ -325,9 +310,6 @@ def main() -> None:
             defect_type, defect_confidence, _ = detect_defect_type(
                 defect_model, defect_types, defect_input
             )
-            if not should_make_prediction(defect_confidence):
-                defect_type = None
-                defect_confidence = None
 
     _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map, threshold=threshold)
 
