@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 import yaml
 from PIL import Image
 from sklearn.metrics import roc_auc_score
@@ -46,6 +47,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Fusion weight for the classifier probability (PatchCore gets 1 - this).",
+    )
+    parser.add_argument(
+        "--adaptive-fusion",
+        action="store_true",
+        help=(
+            "Also evaluate a per-image confidence-adaptive fusion: each branch is re-scored under "
+            "mild brightness/contrast perturbations, and the per-image fusion weight is derived from "
+            "each branch's own score stability (more stable on this image = trusted more for this "
+            "image), instead of one fixed --classifier-weight for every image."
+        ),
     )
     return parser.parse_args()
 
@@ -111,6 +122,7 @@ def main() -> None:
     patchcore_score_max = patchcore_metrics["score_max"]
 
     labels, classifier_probs, patchcore_scores = [], [], []
+    classifier_perturbation_stds, patchcore_perturbation_stds = [], []
 
     with torch.no_grad():
         for _, row in val_subset.iterrows():
@@ -127,6 +139,24 @@ def main() -> None:
             patchcore_scores.append(result.image_score)
 
             labels.append(int(row["label"]))
+
+            if args.adaptive_fusion:
+                # Re-score under mild brightness/contrast perturbations; a branch that's more
+                # internally stable on this specific image is trusted more for this image.
+                classifier_variant_scores = [prob_defective]
+                patchcore_variant_scores = [result.image_score]
+                for variant in (
+                    TF.adjust_brightness(image, 1.15),
+                    TF.adjust_brightness(image, 0.85),
+                    TF.adjust_contrast(image, 1.15),
+                ):
+                    variant_tensor = transform(variant).unsqueeze(0)
+                    variant_logits = classifier(variant_tensor)
+                    classifier_variant_scores.append(F.softmax(variant_logits, dim=1)[0, 1].item())
+                    variant_result = detector.predict(variant_tensor, foreground_masks=foreground_mask)[0]
+                    patchcore_variant_scores.append(variant_result.image_score)
+                classifier_perturbation_stds.append(float(np.std(classifier_variant_scores)))
+                patchcore_perturbation_stds.append(float(np.std(patchcore_variant_scores)))
 
     labels_arr = np.array(labels)
     classifier_probs_arr = np.array(classifier_probs)
@@ -153,6 +183,32 @@ def main() -> None:
         metrics["threshold"] = float(threshold)
         results[name] = metrics
         print(f"\n=== {name} ===")
+        print(json.dumps(metrics, indent=2))
+
+    if args.adaptive_fusion:
+        classifier_std_arr = np.array(classifier_perturbation_stds)
+        patchcore_std_arr = np.array(patchcore_perturbation_stds)
+        # exp(-std/T) confidence per branch, T = that branch's own median instability across
+        # this val set -- a branch that's more stable than usual on a given image is trusted
+        # more for that image, instead of one fixed weight applied to every image.
+        t_classifier = np.median(classifier_std_arr) + 1e-8
+        t_patchcore = np.median(patchcore_std_arr) + 1e-8
+        conf_classifier = np.exp(-classifier_std_arr / t_classifier)
+        conf_patchcore = np.exp(-patchcore_std_arr / t_patchcore)
+        w_per_image = conf_classifier / (conf_classifier + conf_patchcore + 1e-8)
+        adaptive_fused_scores = w_per_image * classifier_probs_arr + (1 - w_per_image) * patchcore_norm
+
+        threshold = youden_threshold(labels_arr, adaptive_fused_scores)
+        preds = (adaptive_fused_scores >= threshold).astype(int)
+        metrics = compute_classification_metrics(labels_arr, preds)
+        metrics["auroc"] = float(roc_auc_score(labels_arr, adaptive_fused_scores))
+        metrics["threshold"] = float(threshold)
+        metrics["mean_classifier_weight"] = float(w_per_image.mean())
+        metrics["std_classifier_weight"] = float(w_per_image.std())
+        metrics["mean_classifier_perturbation_std"] = float(classifier_std_arr.mean())
+        metrics["mean_patchcore_perturbation_std"] = float(patchcore_std_arr.mean())
+        results["adaptive_fused_ensemble"] = metrics
+        print("\n=== adaptive_fused_ensemble (per-image confidence weighting) ===")
         print(json.dumps(metrics, indent=2))
 
     metrics_dir = PROJECT_ROOT / output_cfg["metrics_dir"]

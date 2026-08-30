@@ -26,3 +26,21 @@ def get_val_transforms(image_size: int = 224) -> transforms.Compose:
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
+
+
+def get_patchcore_bank_augmentation_transforms(image_size: int = 224) -> transforms.Compose:
+    """Mild augmentation for PatchCore memory-bank fitting only (never for
+    scoring/inference). Expands the normal-patch manifold the coreset draws
+    from with small brightness/contrast, rotation, translation, and scale
+    perturbations -- deliberately conservative (no flips, no large
+    rotations) since aggressive augmentation risks teaching the memory bank
+    that genuine defect-like changes are normal."""
+    return transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            transforms.RandomAffine(degrees=5, translate=(0.02, 0.02), scale=(0.98, 1.02)),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ]
+    )

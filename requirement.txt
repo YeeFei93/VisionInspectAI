@@ -4,6 +4,7 @@ matplotlib
 opencv-python
 Pillow
 scikit-learn
+scipy
 torch
 torchvision
 tqdm

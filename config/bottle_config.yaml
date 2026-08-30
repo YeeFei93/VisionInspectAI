@@ -23,8 +23,15 @@ train:
 anomaly_detection:
   backbone: resnet18       # resnet18 or wide_resnet50_2
   layers: [layer2, layer3]
-  coreset_ratio: 0.1
-  max_coreset_size: 2000
+  # coreset_ratio 0.1 previously bound at only 2000 patches (max_coreset_size
+  # was the real constraint, not the ratio). A held-out-normal generalization
+  # check found that under-covered the true patch population and left a
+  # near-miss false-positive risk on unseen normal bottle images (see README
+  # "PatchCore generalization check: held-out normal images"). ratio 0.05
+  # uncapped by max_coreset_size gave the best held-out margin of everything
+  # tested (0.01/0.02/0.05/0.1 ratios, bank augmentation, WideResNet50-2, k=3).
+  coreset_ratio: 0.05
+  max_coreset_size: 10000
   projection_dim: 128
   batch_size: 16
   # Bottle images are a top-down shot of the bottle mouth that fills the

@@ -24,11 +24,16 @@ from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import (
     compute_classification_metrics,
     compute_pixel_level_metrics,
+    plot_four_way_distribution,
+    plot_generalization_gap,
+    plot_memory_bank_pca,
+    plot_score_distribution,
+    plot_threshold_sweep,
     youden_threshold,
 )
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
 from src.preprocessing.segmentation import compute_foreground_mask
-from src.preprocessing.transform import get_val_transforms
+from src.preprocessing.transform import get_patchcore_bank_augmentation_transforms, get_val_transforms
 from src.visualization.heatmap import save_anomaly_heatmap
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +101,73 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Memory neighborhood size for softmax reweighting (default: 9).",
     )
+    parser.add_argument(
+        "--generalization-holdout-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Reserve this fraction of train/good (excluded from the memory bank) to check "
+            "whether the bank generalizes to unseen normal images (0 disables the check)."
+        ),
+    )
+    parser.add_argument(
+        "--threshold-strategy",
+        choices=("youden", "holdout-margin", "percentile"),
+        default="youden",
+        help=(
+            "'youden' (default) picks the threshold that maximizes TPR-FPR on the labeled test "
+            "set. 'holdout-margin' instead calibrates it from normal-only scores (memory-bank + "
+            "held-out train/good, via --generalization-holdout-ratio) as mean + "
+            "--threshold-margin-std standard deviations -- a safety margin against normal "
+            "variation the test set's Youden threshold doesn't account for. 'percentile' "
+            "instead uses the --threshold-percentile percentile of those same normal-only "
+            "scores, avoiding holdout-margin's Gaussian assumption. Both require "
+            "--generalization-holdout-ratio > 0."
+        ),
+    )
+    parser.add_argument(
+        "--threshold-margin-std",
+        type=float,
+        default=3.0,
+        help="Standard deviations above the normal-score mean for --threshold-strategy holdout-margin.",
+    )
+    parser.add_argument(
+        "--threshold-percentile",
+        type=float,
+        default=95.0,
+        help="Percentile (0-100] of normal-only scores used for --threshold-strategy percentile.",
+    )
+    parser.add_argument(
+        "--coreset-ratio",
+        type=float,
+        default=None,
+        help="Override anomaly_detection.coreset_ratio (fraction of all patches eligible for the coreset).",
+    )
+    parser.add_argument(
+        "--bank-augmentation",
+        action="store_true",
+        help=(
+            "Apply mild brightness/contrast/rotation/translation/scale augmentation to train/good "
+            "before feature extraction, to expand the normal manifold the memory bank is built from."
+        ),
+    )
+    parser.add_argument(
+        "--bank-augmentation-passes",
+        type=int,
+        default=3,
+        help="Number of independently-augmented passes over train/good when --bank-augmentation is set.",
+    )
+    parser.add_argument(
+        "--perturbation-confidence",
+        action="store_true",
+        help=(
+            "For held-out train/good images (requires --generalization-holdout-ratio > 0), also "
+            "re-score each image under mild brightness/contrast perturbations and report the score's "
+            "standard deviation as a per-image stability/confidence signal -- independent of the mean "
+            "generalization gap, an image whose score swings widely under mild perturbation is sitting "
+            "in an unstable region of the memory bank's scoring function."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -111,6 +183,93 @@ def load_gt_mask(mask_path, image_size: int) -> np.ndarray:
         return np.zeros((image_size, image_size), dtype=np.uint8)
     mask_img = Image.open(mask_path).convert("L").resize((image_size, image_size), Image.NEAREST)
     return (np.array(mask_img) > 127).astype(np.uint8)
+
+
+class RepeatedDataset(torch.utils.data.Dataset):
+    """Repeats a dataset `repeats` times so a stochastic transform is
+    re-sampled fresh each repetition -- used to draw multiple independently
+    augmented views per image when building the PatchCore memory bank."""
+
+    def __init__(self, dataset, repeats: int):
+        self.dataset = dataset
+        self.repeats = repeats
+
+    def __len__(self):
+        return len(self.dataset) * self.repeats
+
+    def __getitem__(self, idx):
+        return self.dataset[idx % len(self.dataset)]
+
+
+def score_image_rows(
+    rows,
+    detector: PatchCoreAnomalyDetector,
+    transform,
+    image_size: int,
+    use_foreground_mask: bool,
+) -> tuple:
+    """Run the detector over manifest rows and return (scores, image_paths).
+    Used for the held-out normal-image generalization check; the paths let
+    us identify which specific held-out image is hardest."""
+    scores = []
+    paths = []
+    for _, row in rows.iterrows():
+        image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
+        resized_image = image.resize((image_size, image_size))
+        input_tensor = transform(image).unsqueeze(0)
+
+        foreground_mask = None
+        if use_foreground_mask:
+            foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
+
+        result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
+        scores.append(result.image_score)
+        paths.append(row["image_path"])
+    return scores, paths
+
+
+def score_image_rows_with_perturbation_confidence(
+    rows,
+    detector: PatchCoreAnomalyDetector,
+    transform,
+    image_size: int,
+    use_foreground_mask: bool,
+) -> tuple:
+    """Like score_image_rows, but also re-scores each image under mild
+    brightness/contrast perturbations and returns the per-image standard
+    deviation across those views as a stability/confidence signal: a
+    normal image whose score swings widely under a perturbation this small
+    is sitting in an unstable region of the memory bank's scoring
+    function, independent of its (possibly unremarkable) mean score."""
+    import torchvision.transforms.functional as TF
+
+    scores = []
+    paths = []
+    perturbation_stds = []
+    for _, row in rows.iterrows():
+        image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
+        resized_image = image.resize((image_size, image_size))
+
+        foreground_mask = None
+        if use_foreground_mask:
+            foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
+
+        variants = [
+            image,
+            TF.adjust_brightness(image, 1.15),
+            TF.adjust_brightness(image, 0.85),
+            TF.adjust_contrast(image, 1.15),
+        ]
+        variant_scores = []
+        for variant in variants:
+            input_tensor = transform(variant).unsqueeze(0)
+            result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
+            variant_scores.append(result.image_score)
+
+        scores.append(variant_scores[0])  # unperturbed score, same as score_image_rows
+        paths.append(row["image_path"])
+        perturbation_stds.append(float(np.std(variant_scores)))
+    return scores, paths, perturbation_stds
 
 
 def build_run_name(
@@ -167,9 +326,6 @@ def main() -> None:
     image_size = data_cfg["image_size"]
     transform = get_val_transforms(image_size)
 
-    train_dataset = ManifestImageDataset(train_rows, PROJECT_ROOT, transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
-
     device = (
         "cuda" if torch.cuda.is_available()
         else "mps" if torch.backends.mps.is_available()
@@ -206,6 +362,9 @@ def main() -> None:
             "reweight_num_neighbors", DEFAULT_REWEIGHT_NUM_NEIGHBORS
         )
     )
+    coreset_ratio = (
+        args.coreset_ratio if args.coreset_ratio is not None else anomaly_cfg["coreset_ratio"]
+    )
     if max_coreset_size <= 0:
         raise ValueError("max_coreset_size must be positive")
     if projection_dim <= 0:
@@ -214,16 +373,54 @@ def main() -> None:
         raise ValueError("num_neighbors must be positive")
     if reweight_num_neighbors <= 1:
         raise ValueError("reweight_num_neighbors must be greater than 1")
+    if not 0 < coreset_ratio <= 1:
+        raise ValueError("coreset_ratio must be between 0 (exclusive) and 1 (inclusive)")
+    if args.threshold_strategy in ("holdout-margin", "percentile") and args.generalization_holdout_ratio <= 0:
+        raise ValueError(
+            f"--threshold-strategy {args.threshold_strategy} requires --generalization-holdout-ratio > 0"
+        )
+    if not 0 < args.threshold_percentile <= 100:
+        raise ValueError("threshold_percentile must be between 0 (exclusive) and 100 (inclusive)")
+    if args.perturbation_confidence and args.generalization_holdout_ratio <= 0:
+        raise ValueError("--perturbation-confidence requires --generalization-holdout-ratio > 0")
     print(
         f"Coreset projection: {projection_method} | Seed: {seed} | "
-        f"Max coreset: {max_coreset_size} | Projection dim: {projection_dim} | "
+        f"Max coreset: {max_coreset_size} | Coreset ratio: {coreset_ratio} | "
+        f"Projection dim: {projection_dim} | "
         f"Layers: {', '.join(layers)} | k-NN: {num_neighbors} | "
         f"Softmax reweighting: {softmax_reweighting}"
     )
+
+    generalization_holdout_ratio = args.generalization_holdout_ratio
+    holdout_rows = train_rows.iloc[0:0]
+    bank_rows = train_rows
+    if generalization_holdout_ratio > 0:
+        if not 0 < generalization_holdout_ratio < 1:
+            raise ValueError("generalization_holdout_ratio must be between 0 and 1 (exclusive)")
+        shuffled_rows = train_rows.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        num_holdout = max(1, int(len(shuffled_rows) * generalization_holdout_ratio))
+        holdout_rows = shuffled_rows.iloc[:num_holdout].reset_index(drop=True)
+        bank_rows = shuffled_rows.iloc[num_holdout:].reset_index(drop=True)
+        print(
+            f"Generalization holdout: reserving {len(holdout_rows)}/{len(train_rows)} "
+            f"train/good images (fitting the memory bank on the remaining {len(bank_rows)})"
+        )
+
+    train_dataset = ManifestImageDataset(bank_rows, PROJECT_ROOT, transform=transform)
+    if args.bank_augmentation:
+        augmentation_transform = get_patchcore_bank_augmentation_transforms(image_size)
+        augmented_dataset = ManifestImageDataset(bank_rows, PROJECT_ROOT, transform=augmentation_transform)
+        train_dataset = RepeatedDataset(augmented_dataset, repeats=args.bank_augmentation_passes)
+        print(
+            f"Bank augmentation enabled: {args.bank_augmentation_passes} independently-augmented "
+            f"passes over {len(bank_rows)} train/good images ({len(train_dataset)} total feature-extraction views)"
+        )
+    train_loader = DataLoader(train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
+
     detector = PatchCoreAnomalyDetector(
         backbone=anomaly_cfg["backbone"],
         layers=layers,
-        coreset_ratio=anomaly_cfg["coreset_ratio"],
+        coreset_ratio=coreset_ratio,
         max_coreset_size=max_coreset_size,
         projection_dim=projection_dim,
         device=device,
@@ -260,11 +457,61 @@ def main() -> None:
     labels_arr = np.array(labels)
 
     auroc = roc_auc_score(labels_arr, scores_arr)
-    threshold = youden_threshold(labels_arr, scores_arr)
+    youden_threshold_value = youden_threshold(labels_arr, scores_arr)
+
+    # Generalization check: does the memory bank generalize to normal images it
+    # never saw, or does it only recognize the specific train/good images it was
+    # built from? A held-out score distribution shifted well above the
+    # memory-bank distribution indicates the latter (overfitting). Computed
+    # before threshold selection so --threshold-strategy holdout-margin can use it.
+    bank_scores = holdout_scores = None
+    perturbation_stds = None
+    if generalization_holdout_ratio > 0:
+        print(f"Scoring {len(holdout_rows)} held-out train/good images for the generalization check...")
+        holdout_scores, holdout_paths = score_image_rows(holdout_rows, detector, transform, image_size, use_foreground_mask)
+        bank_scores, _bank_paths = score_image_rows(bank_rows, detector, transform, image_size, use_foreground_mask)
+        hardest_order = np.argsort(holdout_scores)[::-1][:3]
+        print("Hardest held-out train/good images (highest anomaly score):")
+        for rank in hardest_order:
+            print(f"  {holdout_scores[rank]:.4f}  {holdout_paths[rank]}")
+
+        if args.perturbation_confidence:
+            print(f"Re-scoring {len(holdout_rows)} held-out images under mild perturbations for confidence check...")
+            _pconf_scores, pconf_paths, perturbation_stds = score_image_rows_with_perturbation_confidence(
+                holdout_rows, detector, transform, image_size, use_foreground_mask
+            )
+            least_stable_order = np.argsort(perturbation_stds)[::-1][:3]
+            print("Least-stable held-out images (highest score std under perturbation):")
+            for rank in least_stable_order:
+                print(
+                    f"  score={holdout_scores[rank]:.4f}  perturbation_std={perturbation_stds[rank]:.4f}  "
+                    f"{pconf_paths[rank]}"
+                )
+
+    if args.threshold_strategy == "holdout-margin":
+        # Calibrated from normal-only scores (never the labeled test set), so it
+        # carries an explicit safety margin instead of the Youden threshold's
+        # arbitrary pick within a perfectly-separable test set's good/defective gap.
+        normal_scores = np.array(bank_scores + holdout_scores)
+        threshold = float(normal_scores.mean() + args.threshold_margin_std * normal_scores.std())
+    elif args.threshold_strategy == "percentile":
+        # Also calibrated from normal-only scores, but as a percentile rather than
+        # mean + k*std -- doesn't assume the normal-score distribution is Gaussian.
+        normal_scores = np.array(bank_scores + holdout_scores)
+        threshold = float(np.percentile(normal_scores, args.threshold_percentile))
+    else:
+        threshold = youden_threshold_value
+
     predictions = (scores_arr >= threshold).astype(int)
     metrics = compute_classification_metrics(labels_arr, predictions)
     metrics["auroc"] = float(auroc)
     metrics["threshold"] = float(threshold)
+    metrics["threshold_strategy"] = args.threshold_strategy
+    metrics["youden_threshold"] = float(youden_threshold_value)
+    if args.threshold_strategy == "holdout-margin":
+        metrics["threshold_margin_std"] = args.threshold_margin_std
+    if args.threshold_strategy == "percentile":
+        metrics["threshold_percentile"] = args.threshold_percentile
     metrics["score_min"] = float(scores_arr.min())
     metrics["score_max"] = float(scores_arr.max())
     metrics["projection_method"] = projection_method
@@ -278,7 +525,34 @@ def main() -> None:
     metrics["reweight_num_neighbors"] = reweight_num_neighbors
 
     print(f"Image-level ROC-AUC: {auroc:.4f}")
-    print(f"Chosen threshold (Youden's J): {threshold:.4f}")
+    print(f"Chosen threshold ({args.threshold_strategy}): {threshold:.4f}")
+    if args.threshold_strategy != "youden":
+        print(f"(Youden's J threshold would have been: {youden_threshold_value:.4f})")
+
+    if generalization_holdout_ratio > 0:
+        generalization_gap = float(np.mean(holdout_scores) - np.mean(bank_scores))
+        metrics["generalization_holdout_ratio"] = generalization_holdout_ratio
+        metrics["memory_bank_score_mean"] = float(np.mean(bank_scores))
+        metrics["memory_bank_score_max"] = float(np.max(bank_scores))
+        metrics["holdout_score_mean"] = float(np.mean(holdout_scores))
+        metrics["holdout_score_max"] = float(np.max(holdout_scores))
+        metrics["generalization_gap"] = generalization_gap
+        print(
+            f"Memory-bank train/good mean score: {np.mean(bank_scores):.4f} | "
+            f"Held-out train/good mean score: {np.mean(holdout_scores):.4f} | "
+            f"Generalization gap: {generalization_gap:.4f}"
+        )
+        print(
+            f"Held-out max score: {np.max(holdout_scores):.4f} vs. decision threshold: {threshold:.4f} "
+            f"(margin: {threshold - np.max(holdout_scores):.4f})"
+        )
+        if perturbation_stds is not None:
+            metrics["holdout_perturbation_std_mean"] = float(np.mean(perturbation_stds))
+            metrics["holdout_perturbation_std_max"] = float(np.max(perturbation_stds))
+            print(
+                f"Held-out perturbation-confidence std: mean {np.mean(perturbation_stds):.4f} | "
+                f"max {np.max(perturbation_stds):.4f}"
+            )
 
     # Pixel-level localization: predicted heatmap vs ground_truth mask.
     print("Loading ground-truth masks for pixel-level evaluation...")
@@ -301,7 +575,8 @@ def main() -> None:
     checkpoint_dir = PROJECT_ROOT / output_cfg["checkpoint_dir"]
     metrics_dir = PROJECT_ROOT / output_cfg["metrics_dir"]
     heatmaps_dir = PROJECT_ROOT / output_cfg.get("heatmaps_dir", "outputs/heatmaps")
-    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir):
+    figures_dir = PROJECT_ROOT / output_cfg.get("figures_dir", "outputs/figures")
+    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir, figures_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     run_name = build_run_name(
@@ -318,9 +593,68 @@ def main() -> None:
         softmax_reweighting=softmax_reweighting,
         reweight_num_neighbors=reweight_num_neighbors,
     )
+    if generalization_holdout_ratio > 0:
+        # Fits the bank on less than the full train/good set -- keep this out of the
+        # canonical run name so it never overwrites the full-data checkpoint/metrics.
+        run_name += f"_genholdout{generalization_holdout_ratio}"
+    if args.coreset_ratio is not None:
+        run_name += f"_cr{args.coreset_ratio}"
+    if args.bank_augmentation:
+        run_name += f"_bankaug{args.bank_augmentation_passes}"
+    if args.threshold_strategy != "youden":
+        # Same reasoning: a non-default threshold changes the reported classification
+        # metrics, so it must never collide with the canonical Youden-threshold run.
+        run_name += f"_thr{args.threshold_strategy}"
+        if args.threshold_strategy == "holdout-margin" and args.threshold_margin_std != 3.0:
+            run_name += f"_std{args.threshold_margin_std}"
+        if args.threshold_strategy == "percentile" and args.threshold_percentile != 95.0:
+            run_name += f"_pct{args.threshold_percentile}"
+    if args.perturbation_confidence:
+        run_name += "_pconf"
     if not args.metrics_only:
         detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    # PatchCore fits in one shot (no epochs), so these stand in for a
+    # per-epoch loss/accuracy curve: how well the scores separate
+    # good/defective, and how accuracy/precision/recall/F1 trade off
+    # across candidate thresholds around the chosen one.
+    title_prefix = f"PatchCore ({category})"
+    plot_memory_bank_pca(
+        detector.memory_bank.numpy(),
+        output_path=figures_dir / f"{run_name}_memory_bank_pca.png",
+        title_prefix=title_prefix,
+    )
+    plot_score_distribution(
+        scores_arr,
+        labels_arr,
+        threshold,
+        output_path=figures_dir / f"{run_name}_score_distribution.png",
+        title_prefix=title_prefix,
+    )
+    plot_threshold_sweep(
+        scores_arr,
+        labels_arr,
+        threshold,
+        output_path=figures_dir / f"{run_name}_threshold_sweep.png",
+        title_prefix=title_prefix,
+    )
+    if holdout_scores is not None:
+        plot_generalization_gap(
+            bank_scores,
+            holdout_scores,
+            output_path=figures_dir / f"{run_name}_generalization_gap.png",
+            title_prefix=title_prefix,
+        )
+        plot_four_way_distribution(
+            bank_scores,
+            holdout_scores,
+            scores_arr[labels_arr == 0].tolist(),
+            scores_arr[labels_arr == 1].tolist(),
+            threshold,
+            output_path=figures_dir / f"{run_name}_four_way_distribution.png",
+            title_prefix=title_prefix,
+        )
 
     if args.metrics_only:
         print(f"Saved metrics to {metrics_dir / f'{run_name}_metrics.json'}")
@@ -362,6 +696,7 @@ def main() -> None:
     print(f"Saved {len(saved_examples)} example heatmaps to {heatmaps_dir}")
     print(f"Saved memory bank to {checkpoint_dir / f'{run_name}_memory_bank.pt'}")
     print(f"Saved metrics to {metrics_dir / f'{run_name}_metrics.json'}")
+    print(f"Saved score distribution + threshold sweep plots to {figures_dir}")
 
 
 if __name__ == "__main__":
