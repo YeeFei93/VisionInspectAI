@@ -9,6 +9,7 @@ import numpy as np
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
     accuracy_score,
+    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -30,6 +31,23 @@ def compute_classification_metrics(
         "f1": f1_score(y_true, y_pred, zero_division=0),
         "confusion_matrix": confusion_matrix(y_true, y_pred).tolist(),
     }
+
+
+def compute_per_class_report(
+    y_true: Sequence[int], y_pred: Sequence[int], class_names: Sequence[str]
+) -> dict:
+    """Per-class precision/recall/F1/support (plus macro/weighted averages),
+    for multi-class classifiers (category classifier, defect-type
+    classifier) where the aggregate accuracy + confusion matrix alone don't
+    show which specific classes are being confused."""
+    return classification_report(
+        y_true,
+        y_pred,
+        labels=list(range(len(class_names))),
+        target_names=list(class_names),
+        output_dict=True,
+        zero_division=0,
+    )
 
 
 def youden_threshold(y_true: Sequence[int], scores: Sequence[float]) -> float:
@@ -107,6 +125,45 @@ def plot_confusion_matrix(
     fig, ax = plt.subplots(figsize=(4, 4))
     disp.plot(ax=ax, cmap="Blues", colorbar=False)
     ax.set_title("Baseline classifier — confusion matrix")
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path)
+
+    return fig
+
+
+def plot_training_curves(
+    history: Sequence[dict],
+    output_path: Optional[Path] = None,
+    title_prefix: str = "Baseline classifier",
+):
+    """Per-epoch train/val loss and accuracy curves from a `history` list of
+    `{"epoch", "train_loss", "train_accuracy", "val_loss", "val_accuracy"}`
+    dicts (see train_baseline.py)."""
+    import matplotlib.pyplot as plt
+
+    epochs = [entry["epoch"] for entry in history]
+    train_loss = [entry["train_loss"] for entry in history]
+    val_loss = [entry["val_loss"] for entry in history]
+    train_accuracy = [entry["train_accuracy"] for entry in history]
+    val_accuracy = [entry["val_accuracy"] for entry in history]
+
+    fig, (loss_ax, acc_ax) = plt.subplots(2, 1, figsize=(5, 7), sharex=True)
+
+    loss_ax.plot(epochs, train_loss, label="train")
+    loss_ax.plot(epochs, val_loss, label="validation")
+    loss_ax.set_ylabel("Loss")
+    loss_ax.set_title(f"{title_prefix} — loss")
+    loss_ax.legend()
+
+    acc_ax.plot(epochs, train_accuracy, label="train")
+    acc_ax.plot(epochs, val_accuracy, label="validation")
+    acc_ax.set_xlabel("Epoch")
+    acc_ax.set_ylabel("Accuracy")
+    acc_ax.set_title(f"{title_prefix} — accuracy")
+    acc_ax.legend()
+
     fig.tight_layout()
 
     if output_path is not None:

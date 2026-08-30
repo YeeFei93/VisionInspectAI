@@ -25,7 +25,7 @@ from sklearn.metrics import roc_auc_score
 
 from src.data.dataset import load_manifest, make_train_val_split
 from src.evaluation.metrics import compute_classification_metrics, youden_threshold
-from src.models.anomaly_detector import PatchCoreAnomalyDetector
+from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
 from src.models.baseline_classifier import build_baseline_model
 from src.preprocessing.segmentation import compute_foreground_mask
 from src.preprocessing.transform import get_val_transforms
@@ -86,15 +86,25 @@ def main() -> None:
 
     # --- PatchCore half ---
     detector = PatchCoreAnomalyDetector(
-        backbone=anomaly_cfg["backbone"], layers=tuple(anomaly_cfg["layers"]), device="cpu"
+        backbone=anomaly_cfg["backbone"],
+        layers=tuple(anomaly_cfg["layers"]),
+        device="cpu",
+        num_neighbors=anomaly_cfg.get("num_neighbors", 1),
+        softmax_reweighting=anomaly_cfg.get("softmax_reweighting", False),
+        reweight_num_neighbors=anomaly_cfg.get("reweight_num_neighbors", 9),
     )
     detector_ckpt = (
         PROJECT_ROOT / output_cfg["checkpoint_dir"] / f"patchcore_{anomaly_cfg['backbone']}_{category}_memory_bank.pt"
     )
     detector.load(detector_ckpt)
 
+    scoring_suffix = scoring_artifact_suffix(
+        anomaly_cfg.get("num_neighbors", 1),
+        anomaly_cfg.get("softmax_reweighting", False),
+        anomaly_cfg.get("reweight_num_neighbors", 9),
+    )
     patchcore_metrics = json.loads(
-        (PROJECT_ROOT / output_cfg["metrics_dir"] / f"patchcore_{anomaly_cfg['backbone']}_{category}_metrics.json")
+        (PROJECT_ROOT / output_cfg["metrics_dir"] / f"patchcore_{anomaly_cfg['backbone']}_{category}{scoring_suffix}_metrics.json")
         .read_text()
     )
     patchcore_score_min = patchcore_metrics["score_min"]
