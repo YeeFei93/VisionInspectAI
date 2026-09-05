@@ -34,6 +34,7 @@ from src.models.anomaly_detector import (  # noqa: E402
     scoring_artifact_suffix,
 )
 from src.models.baseline_classifier import build_baseline_model  # noqa: E402
+from src.models.defect_regions import classify_defect_regions, summarize_distinct_types  # noqa: E402
 from src.preprocessing.defect_crop import crop_to_defect  # noqa: E402
 from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
@@ -58,6 +59,11 @@ CATEGORY_CONFIGS = {
 CATEGORY_CLASSIFIER_CHECKPOINT = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
 CATEGORY_CLASSIFIER_METRICS = PROJECT_ROOT / "outputs" / "metrics" / "category_classifier_metrics.json"
 CATEGORY_CLASSIFIER_IMAGE_SIZE = 224
+CONFIDENCE_THRESHOLD = 0.60
+
+
+def should_make_prediction(confidence: float, threshold: float = CONFIDENCE_THRESHOLD) -> bool:
+    return confidence >= threshold
 
 
 @st.cache_resource
@@ -241,7 +247,10 @@ def main() -> None:
 
     uploaded_file = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
     if uploaded_file is None:
-        st.info(f"Upload a .png / .jpg image of one of: {', '.join(sorted(known_categories))}.")
+        st.info(
+            "Upload a .png / .jpg image of one of the supported categories: "
+            f"{', '.join(sorted(known_categories))}."
+        )
         return
 
     original_image = load_as_rgb(uploaded_file)
@@ -260,6 +269,13 @@ def main() -> None:
         category = st.selectbox("Category", options, index=options.index(detected_category))
     if category != detected_category:
         st.caption(f"Using manually selected category: **{category}**")
+
+    if not should_make_prediction(confidence):
+        st.warning(
+            "Category not found. Confidence is below 60%, so no prediction is shown for this image. "
+            "Please try another image or choose a category manually to continue."
+        )
+        return
 
     config = load_config(category)
     detector = load_detector(category, config)
@@ -291,8 +307,11 @@ def main() -> None:
     severity, severity_reason = classify_severity(result.anomaly_map, foreground_mask, threshold)
 
     defect_type, defect_confidence = None, None
+    defect_model_available = False
+    distinct_defect_regions = []
     if prediction == "Defective":
         defect_model, defect_types, defect_metadata = load_defect_classifier(category, config)
+        defect_model_available = defect_model is not None
         if defect_model is not None:
             defect_input = input_tensor
             if defect_metadata.get("crop_mode") == "defect_focused":
@@ -310,6 +329,17 @@ def main() -> None:
             defect_type, defect_confidence, _ = detect_defect_type(
                 defect_model, defect_types, defect_input
             )
+            if not should_make_prediction(defect_confidence):
+                defect_type = None
+                defect_confidence = None
+
+            # Whole-image (or defect-focused-crop) prediction only returns one
+            # type -- also split the anomaly mask into distinct regions and
+            # classify each crop separately, so images with multiple
+            # simultaneous defects (e.g. MVTec wood's "combined" type) can
+            # surface more than one type.
+            regions = classify_defect_regions(resized_image, result.anomaly_map, threshold, defect_model, defect_types)
+            distinct_defect_regions = [r for r in summarize_distinct_types(regions) if should_make_prediction(r.confidence)]
 
     _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map, threshold=threshold)
 
@@ -331,10 +361,24 @@ def main() -> None:
     if prediction == "Defective":
         if defect_type is not None:
             st.metric("Likely defect type", defect_type, delta=f"confidence {defect_confidence:.0%}", delta_color="off")
+        elif defect_model_available:
+            st.caption(
+                "Defect-type classifier ran but its prediction confidence was below 60%, so no defect type is shown."
+            )
         else:
             st.caption(
                 f"No defect-type classifier trained for **{category}** yet — run "
                 f"`python -m src.models.train_defect_classifier --config config/{category}_config.yaml` to enable this."
+            )
+
+        if len(distinct_defect_regions) > 1:
+            st.write("**Multiple defect types detected in this image (region-based, approximate):**")
+            for region in distinct_defect_regions:
+                st.write(f"- {region.defect_type} — confidence {region.confidence:.0%}, region area {region.area}px")
+            st.caption(
+                "Each anomalous region (connected component of the heatmap above the threshold) is cropped "
+                "and classified independently, since MVTec-AD's own labels don't break a 'combined' image "
+                "down into its individual defect types."
             )
         st.error(
             f"Prediction: {prediction}\n\n"
