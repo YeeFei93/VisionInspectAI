@@ -653,6 +653,42 @@ python -m src.models.train_pca_lda_defect_classifier --config config/screw_confi
 
 **Finding — PCA+LDA helps exactly where the deep classifier was weakest, and hurts where it was already strong.** On screw and bottle — the two categories where the fine-tuned CNN head scored worst (0.444, 0.789) — PCA+LDA improved val accuracy by 8–5 points. On hazelnut/carpet/leather, where the CNN head was already doing well (0.815–0.964), PCA+LDA was clearly worse. This is consistent with *why* each method should win in each regime: with only ~16–20 train images per class, fine-tuning a full CNN head (thousands of parameters) is prone to overfitting/underfitting noise, while LDA fits far fewer parameters (a linear decision boundary per class pair in a 30-d PCA-reduced space) directly from the same frozen embeddings — a better-conditioned problem exactly when data per class is scarcest. But LDA's decision boundary is linear and the embeddings aren't fine-tuned to the category's specific defects, so once the CNN head has enough signal to learn a good nonlinear boundary (leather, carpet, hazelnut), it pulls ahead. **Lesson:** there's no universally-better model here — for a genuinely tiny, hard fine-grained problem (screw), a lower-capacity classical classifier on frozen features can beat a fine-tuned CNN head; for a moderately-sized, visually-separable one, fine-tuning wins. Try both and pick per category rather than assuming the deep model is always the right default.
 
+### Defect-focused crop ablation
+
+[src/preprocessing/defect_crop.py](src/preprocessing/defect_crop.py) converts a binary localization mask into a padded square crop. Training can use either MVTec ground-truth masks (`--crop-source ground-truth`) or the default PatchCore detector's predicted pixel mask (`--crop-source patchcore`). The latter matches deployment: [app/streamlit_app.py](app/streamlit_app.py) thresholds the uploaded image's PatchCore anomaly map, intersects it with the object foreground when enabled, applies the same crop metadata saved with the classifier, then predicts defect type from that crop.
+
+Ground-truth crops produced an apparently large screw gain (0.444 historical full-image accuracy → 0.861 oracle-crop accuracy), but the same model fell to 0.194 when evaluated with PatchCore-predicted crops. That is train/inference crop-domain mismatch, so the oracle result is not used for deployment. Retraining directly on PatchCore crops and seeding both alternatives at 42 gives the fair comparison:
+
+| Screw ResNet18 input | Val accuracy | Crop available at deployment? |
+|---|---:|---|
+| Full image, seeded rerun | 0.4722 | Yes |
+| Ground-truth-mask crop | 0.8611 | No (oracle only) |
+| Ground-truth-trained model, PatchCore crop at evaluation | 0.1944 | Yes, but mismatched training domain |
+| PatchCore crop for both train and validation | **0.6111** | **Yes** |
+
+The deployment-matched crop improves screw by **13.89 accuracy points** on the identical 83/36 split. It correctly classifies all 7 `manipulated_front`, 6/7 `scratch_head`, and 7/8 `scratch_neck` validation images, while `thread_side`/`thread_top` remain difficult. Oracle focused crops did not establish a general category improvement: compared with the historical full-image runs, bottle scored 0.684 vs 0.789, hazelnut 0.810 vs 0.857, carpet 0.889 vs 0.815, and leather 0.893 vs 0.964; deployment-time predicted crops did not beat the full-image model for any of those four. Therefore only [config/screw_config.yaml](config/screw_config.yaml) enables `defect_classifier.use_focused_crops`; every other category explicitly keeps it false.
+
+**Methodological caveat:** PatchCore's pixel threshold is selected from the labeled test set in the existing anomaly-evaluation pipeline, so this crop experiment inherits that optimistic calibration and remains a same-dataset ablation, not an independent production estimate. A stronger follow-up would calibrate the pixel threshold on a separate validation set and evaluate defect typing on untouched images.
+- **Defect-focused crops only help when training and deployment use the same localization source.** Ground-truth-mask crops raised screw's oracle validation accuracy to 0.8611, but that model collapsed to 0.1944 when fed deployable PatchCore crops. Training and validating on PatchCore crops instead improved the reproducibly seeded full-image result from 0.4722 to 0.6111. The gain is enabled only for screw because predicted crops did not beat full images elsewhere, and it still inherits the detector pixel threshold's same-test-set calibration.
+
+### Classical ML alternative: PCA + LDA defect-type classifier
+
+[src/models/train_pca_lda_defect_classifier.py](src/models/train_pca_lda_defect_classifier.py) targets the exact same per-category defect-type problem and split as the table above, but replaces the fine-tuned CNN head with a classical pipeline: frozen ImageNet-pretrained ResNet18 embeddings (512-d, no fine-tuning) → `StandardScaler` → PCA (30 components) → Linear Discriminant Analysis as the classifier itself.
+
+```bash
+python -m src.models.train_pca_lda_defect_classifier --config config/screw_config.yaml
+```
+
+| Category | Train / val images | Deep classifier (CNN head) val accuracy | PCA+LDA val accuracy |
+|---|---|---|---|
+| Screw | 83 / 36 | 0.444 | **0.528** |
+| Bottle | 44 / 19 | 0.789 | **0.842** |
+| Hazelnut | 49 / 21 | **0.857** | 0.714 |
+| Carpet | 62 / 27 | **0.815** | 0.593 |
+| Leather | 64 / 28 | **0.964** | 0.750 |
+
+**Finding — PCA+LDA helps exactly where the deep classifier was weakest, and hurts where it was already strong.** On screw and bottle — the two categories where the fine-tuned CNN head scored worst (0.444, 0.789) — PCA+LDA improved val accuracy by 8–5 points. On hazelnut/carpet/leather, where the CNN head was already doing well (0.815–0.964), PCA+LDA was clearly worse. This is consistent with *why* each method should win in each regime: with only ~16–20 train images per class, fine-tuning a full CNN head (thousands of parameters) is prone to overfitting/underfitting noise, while LDA fits far fewer parameters (a linear decision boundary per class pair in a 30-d PCA-reduced space) directly from the same frozen embeddings — a better-conditioned problem exactly when data per class is scarcest. But LDA's decision boundary is linear and the embeddings aren't fine-tuned to the category's specific defects, so once the CNN head has enough signal to learn a good nonlinear boundary (leather, carpet, hazelnut), it pulls ahead. **Lesson:** there's no universally-better model here — for a genuinely tiny, hard fine-grained problem (screw), a lower-capacity classical classifier on frozen features can beat a fine-tuned CNN head; for a moderately-sized, visually-separable one, fine-tuning wins. Try both and pick per category rather than assuming the deep model is always the right default.
+
 ## Notes & Lessons Learned
 
 - **The baseline supervised classifier's near-perfect scores are misleading.** Since MVTec's `train/` only contains `good` images, a supervised good-vs-defective classifier has to be trained on a split carved out of `test/` — meaning every defect *type* it's evaluated on was already seen during training. This produced accuracy/precision/recall/F1 all at 1.0, which reflects a tiny, easy, non-independent validation split rather than real-world generalization. Treat this model as a baseline/sanity-check only.
