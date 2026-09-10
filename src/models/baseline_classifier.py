@@ -118,3 +118,63 @@ def freeze_backbone(model: nn.Module, architecture: str) -> nn.Module:
         param.requires_grad = True
 
     return model
+
+
+def unfreeze_last_block(model: nn.Module, architecture: str) -> nn.Module:
+    """Freeze everything except the classification head and the final
+    backbone block/stage, then train both together. A middle ground between
+    `freeze_backbone` (head only) and full fine-tuning: the most
+    task-specific, least general backbone features get to adapt while early,
+    more generic features stay fixed -- the two-phase strategy from the
+    classic Keras "little data" fine-tuning recipe (train the head first,
+    then unfreeze only the last conv block)."""
+    architecture = architecture.lower()
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    if architecture == "resnet18":
+        head = model.fc
+        last_block_modules = [model.layer4]
+    elif architecture == "efficientnet_b0":
+        head = model.classifier[1]
+        last_block_modules = list(model.features.children())[-2:]
+    elif architecture == "convnext_tiny":
+        head = model.classifier[2]
+        last_block_modules = list(model.features.children())[-2:]
+    elif architecture == "vit_b_16":
+        head = model.heads.head
+        last_block_modules = [model.encoder.layers[-1], model.encoder.ln]
+    elif architecture == "simple_cnn":
+        head = model.classifier
+        last_block_modules = list(model.features.children())[-4:]
+    else:
+        raise ValueError(
+            f"Unsupported architecture '{architecture}'. "
+            f"Choose one of {sorted(SUPPORTED_ARCHITECTURES)}"
+        )
+
+    for param in head.parameters():
+        param.requires_grad = True
+    for module in last_block_modules:
+        for param in module.parameters():
+            param.requires_grad = True
+
+    return model
+
+
+FREEZE_MODES = {"none", "all", "last_block"}
+
+
+def apply_freeze_mode(model: nn.Module, architecture: str, freeze_mode: str) -> nn.Module:
+    """Dispatch to an overfitting-control strategy for tiny per-category
+    datasets: `none` fine-tunes every parameter, `all` trains only the head
+    (`freeze_backbone`), and `last_block` trains the head plus the final
+    backbone block/stage (`unfreeze_last_block`)."""
+    if freeze_mode == "none":
+        return model
+    if freeze_mode == "all":
+        return freeze_backbone(model, architecture)
+    if freeze_mode == "last_block":
+        return unfreeze_last_block(model, architecture)
+    raise ValueError(f"Unsupported freeze_mode '{freeze_mode}'. Choose one of {sorted(FREEZE_MODES)}")

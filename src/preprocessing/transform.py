@@ -7,11 +7,17 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
 def get_train_transforms(image_size: int = 224) -> transforms.Compose:
+    """Augmentation for the supervised classifiers (baseline good/defective,
+    category, defect-type). Beyond flip+rotation, adds translate/scale/shear
+    (folded into one RandomAffine call) so the model never sees the same
+    crop/zoom/skew twice -- mirrors the classic Keras "little data" recipe's
+    width/height shift, zoom, and shear ranges, which flip+rotation alone
+    don't cover."""
     return transforms.Compose(
         [
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
+            transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.85, 1.15), shear=10),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
