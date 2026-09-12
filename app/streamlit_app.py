@@ -380,18 +380,9 @@ def main() -> None:
                 "and classified independently, since MVTec-AD's own labels don't break a 'combined' image "
                 "down into its individual defect types."
             )
-        st.error(
-            f"Prediction: {prediction}\n\n"
-            f"Anomaly score: {score:.2f} (decision threshold: {threshold:.2f})\n\n"
-            + (f"Defect type: {defect_type} (confidence {defect_confidence:.0%})\n\n" if defect_type else "")
-            + f"Severity: {severity} — {severity_reason}\n\n"
-            "Likely defect region: highlighted in red"
-        )
+        st.error(f"{severity_reason} Review the red overlay for the likely defect region.")
     else:
-        st.success(
-            f"Prediction: {prediction}\n\n"
-            f"Anomaly score: {score:.2f} (decision threshold: {threshold:.2f})"
-        )
+        st.success("No anomalous region was detected.")
 
 
 if __name__ == "__main__":
