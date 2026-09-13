@@ -18,6 +18,7 @@ from sklearn.model_selection import train_test_split
 
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
 from src.models.baseline_classifier import build_baseline_model
+from src.models.defect_regions import keep_primary_anomaly_region
 from src.models.train_defect_classifier import build_defect_manifest
 from src.preprocessing.defect_crop import crop_to_defect
 from src.preprocessing.segmentation import compute_foreground_mask
@@ -118,8 +119,17 @@ def main() -> None:
             foreground_tensor = None
 
         result = detector.predict(input_tensor, foreground_masks=foreground_tensor)[0]
+        anomaly_map = result.anomaly_map
+        if anomaly_cfg.get("keep_primary_region", False):
+            anomaly_map = keep_primary_anomaly_region(
+                anomaly_map,
+                pixel_threshold,
+                peak_fraction=anomaly_cfg.get(
+                    "primary_region_peak_fraction", 0.0
+                ),
+            )
         predicted_mask = np.logical_and(
-            result.anomaly_map.numpy() >= pixel_threshold,
+            anomaly_map.numpy() >= pixel_threshold,
             foreground_mask,
         )
         focused_image = crop_to_defect(

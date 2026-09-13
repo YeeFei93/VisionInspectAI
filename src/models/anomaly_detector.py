@@ -14,6 +14,7 @@ neighbor or k-nearest-neighbor patch scoring and the paper's optional
 softmax image-score reweighting.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -193,6 +194,7 @@ class PatchCoreAnomalyDetector:
         coreset_ratio: float = 0.1,
         max_coreset_size: int = 2000,
         projection_dim: int = 128,
+        max_coreset_candidates: Optional[int] = None,
         device: str = "cpu",
         seed: int = 42,
         projection_method: str = "random",
@@ -205,6 +207,7 @@ class PatchCoreAnomalyDetector:
         self.coreset_ratio = coreset_ratio
         self.max_coreset_size = max_coreset_size
         self.projection_dim = projection_dim
+        self.max_coreset_candidates = max_coreset_candidates
         self.seed = seed
         self.projection_method = projection_method
         if num_neighbors <= 0:
@@ -228,9 +231,23 @@ class PatchCoreAnomalyDetector:
     def fit(self, loader) -> None:
         """Build the memory bank of normal patch features from train/good."""
         all_patches = []
+        generator = torch.Generator().manual_seed(self.seed)
+        candidates_per_batch = None
+        if self.max_coreset_candidates is not None:
+            candidates_per_batch = max(
+                1, math.ceil(self.max_coreset_candidates / len(loader))
+            )
         for images, _labels in loader:
-            all_patches.append(self._extract_patches(images))
+            patches = self._extract_patches(images)
+            if candidates_per_batch is not None and len(patches) > candidates_per_batch:
+                indices = torch.randperm(len(patches), generator=generator)[
+                    :candidates_per_batch
+                ]
+                patches = patches[indices]
+            all_patches.append(patches)
         all_patches = torch.cat(all_patches, dim=0)
+        if self.max_coreset_candidates is not None:
+            all_patches = all_patches[: self.max_coreset_candidates]
 
         n_select = min(self.max_coreset_size, max(1, int(len(all_patches) * self.coreset_ratio)))
         self.memory_bank = _greedy_coreset(
@@ -301,6 +318,13 @@ class PatchCoreAnomalyDetector:
             anomaly_map = F.interpolate(
                 anomaly_map, size=image_size, mode="bilinear", align_corners=False
             ).squeeze()
+            if foreground_masks is not None and patch_masks is not None and patch_masks[i].any():
+                full_resolution_mask = foreground_masks[i].bool().cpu()
+                anomaly_map = torch.where(
+                    full_resolution_mask,
+                    anomaly_map,
+                    background_fill,
+                )
             results.append(AnomalyResult(image_score=image_score.item(), anomaly_map=anomaly_map))
 
         return results

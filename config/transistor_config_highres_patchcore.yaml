@@ -1,0 +1,38 @@
+category: transistor
+
+data:
+  manifest_path: data/manifests/transistor.csv
+  image_size: 320
+  val_split: 0.3
+  seed: 42
+
+model:
+  architecture: resnet18
+  pretrained: true
+  num_classes: 2
+
+defect_classifier:
+  use_focused_crops: false
+
+train:
+  batch_size: 16
+  epochs: 10
+  learning_rate: 0.0001
+  num_workers: 2
+
+anomaly_detection:
+  artifact_name: patchcore_resnet18_transistor_highres320_layer1-layer2
+  backbone: resnet18
+  layers: [layer1, layer2]
+  coreset_ratio: 0.1
+  max_coreset_size: 2000
+  max_coreset_candidates: 100000
+  projection_dim: 128
+  batch_size: 4
+  use_foreground_mask: false
+
+output:
+  checkpoint_dir: models/checkpoints
+  metrics_dir: outputs/metrics
+  figures_dir: outputs/figures
+  heatmaps_dir: outputs/heatmaps
