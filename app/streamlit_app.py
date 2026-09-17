@@ -38,7 +38,7 @@ from src.models.defect_regions import classify_defect_regions, summarize_distinc
 from src.preprocessing.defect_crop import crop_to_defect  # noqa: E402
 from src.preprocessing.segmentation import compute_foreground_mask  # noqa: E402
 from src.preprocessing.transform import get_val_transforms  # noqa: E402
-from src.visualization.heatmap import make_overlay  # noqa: E402
+from src.visualization.heatmap import make_overlay, create_defect_type_overlay  # noqa: E402
 
 # Category -> its primary config file. Add an entry here after running
 # create_manifest.py + train_baseline.py + run_anomaly_detection.py for a
@@ -343,14 +343,56 @@ def main() -> None:
 
     _normalized_map, heatmap_rgb, overlay = make_overlay(resized_image, result.anomaly_map, threshold=threshold)
 
-    image_col, heatmap_col, overlay_col = st.columns(3)
-    image_col.image(resized_image, caption="Original", use_container_width=True)
-    heatmap_col.image(
-        heatmap_rgb,
-        caption="Anomaly heatmap (red = above decision threshold)",
-        use_container_width=True,
-    )
-    overlay_col.image(overlay, caption="Overlay (likely defect region in red)", use_container_width=True)
+    # Determine if we should show the color-coded defect type overlay
+    show_defect_types_overlay = prediction == "Defective" and len(distinct_defect_regions) > 0
+    
+    if show_defect_types_overlay:
+        # 4-column layout: Original | Heatmap | Defect Types | Overlay
+        image_col, heatmap_col, defect_col, overlay_col = st.columns(4)
+        
+        # Create the color-coded defect type overlay
+        defect_colored_mask, defect_type_overlay, type_to_color = create_defect_type_overlay(
+            resized_image, distinct_defect_regions, image_size, alpha=0.5
+        )
+        
+        image_col.image(resized_image, caption="Original", use_container_width=True)
+        heatmap_col.image(
+            heatmap_rgb,
+            caption="Anomaly heatmap",
+            use_container_width=True,
+        )
+        defect_col.image(
+            defect_type_overlay,
+            caption="Defect type overlay (color-coded)",
+            use_container_width=True,
+        )
+        overlay_col.image(overlay, caption="Heatmap overlay", use_container_width=True)
+    else:
+        # 3-column layout: Original | Heatmap | Overlay
+        image_col, heatmap_col, overlay_col = st.columns(3)
+        image_col.image(resized_image, caption="Original", use_container_width=True)
+        heatmap_col.image(
+            heatmap_rgb,
+            caption="Anomaly heatmap (red = above decision threshold)",
+            use_container_width=True,
+        )
+        overlay_col.image(overlay, caption="Overlay (likely defect region in red)", use_container_width=True)
+
+    # Show color-coded legend if multiple defect types are detected
+    if show_defect_types_overlay:
+        st.markdown("**Defect Type Color Legend:**")
+        
+        legend_cols = st.columns(min(len(distinct_defect_regions), 5))
+        for idx, region in enumerate(distinct_defect_regions):
+            # Get the exact color used in the overlay
+            color_rgb = type_to_color[region.defect_type]
+            color_hex = f"#{color_rgb[0]:02x}{color_rgb[1]:02x}{color_rgb[2]:02x}"
+            with legend_cols[idx % len(legend_cols)]:
+                st.write(
+                    f"<span style='color: {color_hex}; font-weight: bold;'>■</span> {region.defect_type} "
+                    f"({region.confidence:.0%})",
+                    unsafe_allow_html=True
+                )
 
     st.subheader("Result")
     prediction_col, score_col, severity_col = st.columns(3)
@@ -377,8 +419,9 @@ def main() -> None:
                 st.write(f"- {region.defect_type} — confidence {region.confidence:.0%}, region area {region.area}px")
             st.caption(
                 "Each anomalous region (connected component of the heatmap above the threshold) is cropped "
-                "and classified independently, since MVTec-AD's own labels don't break a 'combined' image "
-                "down into its individual defect types."
+                "and classified independently. The color-coded defect type overlay above visually shows which "
+                "color represents each defect type. MVTec-AD's labels don't break a 'combined' image down into "
+                "individual defect types, so this is an approximate visual breakdown."
             )
         st.error(
             f"Prediction: {prediction}\n\n"
