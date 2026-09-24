@@ -7,7 +7,7 @@ data:
   seed: 42
 
 model:
-  architecture: resnet18   # resnet18, efficientnet_b0, or simple_cnn
+  architecture: resnet18
   pretrained: true
   num_classes: 2
 
@@ -21,20 +21,19 @@ train:
   num_workers: 2
 
 anomaly_detection:
-  backbone: resnet18       # resnet18 or wide_resnet50_2
+  backbone: resnet18
   layers: [layer2, layer3]
   coreset_ratio: 0.1
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
-  # Transistor is a discrete object like screw/hazelnut, but its background
-  # (a perforated copper board) is a busy, non-uniform pattern rather than a
-  # plain surface -- the Otsu foreground mask assumes a plain background, so
-  # it would also pick up the board's holes as "foreground". Disable masking
-  # here; see README "Generalization to Other Categories".
   use_foreground_mask: false
   keep_primary_region: true
-  primary_region_peak_fraction: 0.30
+  primary_region_peak_fraction: 0.10
+  train_augmentation:
+    translate_ratio: 0.05
+    copies: 2
+  artifact_name: patchcore_resnet18_transistor_translate5
 
 output:
   checkpoint_dir: models/checkpoints

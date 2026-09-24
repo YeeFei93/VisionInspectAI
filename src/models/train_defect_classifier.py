@@ -28,6 +28,7 @@ from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import compute_per_class_report, plot_training_curves
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
 from src.models.baseline_classifier import build_baseline_model, freeze_backbone
+from src.models.defect_regions import keep_primary_anomaly_region
 from src.preprocessing.segmentation import compute_foreground_mask
 from src.preprocessing.transform import get_train_transforms, get_val_transforms
 
@@ -169,8 +170,17 @@ def add_patchcore_focus_masks(manifest, config: dict):
         result = detector.predict(
             transform(image).unsqueeze(0), foreground_masks=foreground_tensor
         )[0]
+        anomaly_map = result.anomaly_map
+        if anomaly_cfg.get("keep_primary_region", False):
+            anomaly_map = keep_primary_anomaly_region(
+                anomaly_map,
+                pixel_threshold,
+                peak_fraction=anomaly_cfg.get(
+                    "primary_region_peak_fraction", 0.0
+                ),
+            )
         focus_masks.append(
-            np.logical_and(result.anomaly_map.numpy() >= pixel_threshold, foreground_mask)
+            np.logical_and(anomaly_map.numpy() >= pixel_threshold, foreground_mask)
         )
     focused_manifest = manifest.copy()
     focused_manifest["focus_mask"] = focus_masks

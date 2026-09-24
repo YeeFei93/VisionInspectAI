@@ -18,7 +18,7 @@ import torch
 import yaml
 from PIL import Image
 from sklearn.metrics import roc_auc_score
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import (
@@ -27,8 +27,12 @@ from src.evaluation.metrics import (
     youden_threshold,
 )
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
+from src.models.defect_regions import keep_primary_anomaly_region
 from src.preprocessing.segmentation import compute_foreground_mask
-from src.preprocessing.transform import get_val_transforms
+from src.preprocessing.transform import (
+    get_patchcore_train_transforms,
+    get_val_transforms,
+)
 from src.visualization.heatmap import save_anomaly_heatmap
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -166,9 +170,34 @@ def main() -> None:
 
     image_size = data_cfg["image_size"]
     transform = get_val_transforms(image_size)
+    train_augmentation_cfg = anomaly_cfg.get("train_augmentation", {})
+    translate_ratio = float(train_augmentation_cfg.get("translate_ratio", 0.0))
+    augmentation_copies = int(train_augmentation_cfg.get("copies", 0))
+    if augmentation_copies < 0:
+        raise ValueError("train_augmentation.copies must be non-negative")
+    if translate_ratio == 0.0 and augmentation_copies > 0:
+        raise ValueError(
+            "train_augmentation.translate_ratio must be positive when copies are enabled"
+        )
 
-    train_dataset = ManifestImageDataset(train_rows, PROJECT_ROOT, transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False)
+    base_train_dataset = ManifestImageDataset(
+        train_rows, PROJECT_ROOT, transform=transform
+    )
+    train_dataset = base_train_dataset
+    if augmentation_copies > 0:
+        augmented_dataset = ManifestImageDataset(
+            train_rows,
+            PROJECT_ROOT,
+            transform=get_patchcore_train_transforms(
+                image_size, translate_ratio=translate_ratio
+            ),
+        )
+        train_dataset = ConcatDataset(
+            [base_train_dataset] + [augmented_dataset] * augmentation_copies
+        )
+    train_loader = DataLoader(
+        train_dataset, batch_size=anomaly_cfg["batch_size"], shuffle=False
+    )
 
     device = (
         "cuda" if torch.cuda.is_available()
@@ -188,6 +217,7 @@ def main() -> None:
         if args.projection_dim is not None
         else anomaly_cfg["projection_dim"]
     )
+    max_coreset_candidates = anomaly_cfg.get("max_coreset_candidates")
     layers = tuple(args.layers or anomaly_cfg["layers"])
     num_neighbors = (
         args.num_neighbors
@@ -210,22 +240,31 @@ def main() -> None:
         raise ValueError("max_coreset_size must be positive")
     if projection_dim <= 0:
         raise ValueError("projection_dim must be positive")
+    if max_coreset_candidates is not None and max_coreset_candidates <= 0:
+        raise ValueError("max_coreset_candidates must be positive")
     if num_neighbors <= 0:
         raise ValueError("num_neighbors must be positive")
     if reweight_num_neighbors <= 1:
         raise ValueError("reweight_num_neighbors must be greater than 1")
+    torch.manual_seed(seed)
     print(
         f"Coreset projection: {projection_method} | Seed: {seed} | "
         f"Max coreset: {max_coreset_size} | Projection dim: {projection_dim} | "
         f"Layers: {', '.join(layers)} | k-NN: {num_neighbors} | "
         f"Softmax reweighting: {softmax_reweighting}"
     )
+    if augmentation_copies > 0:
+        print(
+            f"Training augmentation: {augmentation_copies} translated copies "
+            f"per image (maximum shift {translate_ratio:.1%})"
+        )
     detector = PatchCoreAnomalyDetector(
         backbone=anomaly_cfg["backbone"],
         layers=layers,
         coreset_ratio=anomaly_cfg["coreset_ratio"],
         max_coreset_size=max_coreset_size,
         projection_dim=projection_dim,
+        max_coreset_candidates=max_coreset_candidates,
         device=device,
         seed=seed,
         projection_method=projection_method,
@@ -270,12 +309,23 @@ def main() -> None:
     metrics["projection_method"] = projection_method
     metrics["seed"] = seed
     metrics["max_coreset_size"] = max_coreset_size
+    metrics["max_coreset_candidates"] = max_coreset_candidates
     metrics["memory_bank_size"] = int(detector.memory_bank.shape[0])
     metrics["projection_dim"] = projection_dim
     metrics["layers"] = list(layers)
     metrics["num_neighbors"] = num_neighbors
     metrics["softmax_reweighting"] = softmax_reweighting
     metrics["reweight_num_neighbors"] = reweight_num_neighbors
+    metrics["keep_primary_region"] = anomaly_cfg.get(
+        "keep_primary_region", False
+    )
+    metrics["primary_region_peak_fraction"] = anomaly_cfg.get(
+        "primary_region_peak_fraction", 0.0
+    )
+    metrics["train_augmentation"] = {
+        "translate_ratio": translate_ratio,
+        "copies": augmentation_copies,
+    }
 
     print(f"Image-level ROC-AUC: {auroc:.4f}")
     print(f"Chosen threshold (Youden's J): {threshold:.4f}")
@@ -291,6 +341,33 @@ def main() -> None:
     ]
     anomaly_maps_np = [m.numpy() for m in anomaly_maps]
     pixel_metrics = compute_pixel_level_metrics(anomaly_maps_np, gt_masks)
+    if anomaly_cfg.get("keep_primary_region", False):
+        calibration_threshold = pixel_metrics["pixel_threshold"]
+        raw_mean_iou = pixel_metrics["mean_iou"]
+        raw_mean_dice = pixel_metrics["mean_dice"]
+        anomaly_maps = [
+            keep_primary_anomaly_region(
+                anomaly_map,
+                calibration_threshold,
+                peak_fraction=anomaly_cfg.get(
+                    "primary_region_peak_fraction", 0.0
+                ),
+            )
+            for anomaly_map in anomaly_maps
+        ]
+        anomaly_maps_np = [m.numpy() for m in anomaly_maps]
+        filtered_metrics = compute_pixel_level_metrics(
+            anomaly_maps_np,
+            gt_masks,
+            pixel_threshold=calibration_threshold,
+        )
+        pixel_metrics["raw_mean_iou"] = raw_mean_iou
+        pixel_metrics["raw_mean_dice"] = raw_mean_dice
+        pixel_metrics["postprocessed_pixel_auroc"] = filtered_metrics[
+            "pixel_auroc"
+        ]
+        pixel_metrics["mean_iou"] = filtered_metrics["mean_iou"]
+        pixel_metrics["mean_dice"] = filtered_metrics["mean_dice"]
     metrics.update(pixel_metrics)
 
     print(f"Pixel-level ROC-AUC: {pixel_metrics['pixel_auroc']:.4f}")
@@ -318,6 +395,7 @@ def main() -> None:
         softmax_reweighting=softmax_reweighting,
         reweight_num_neighbors=reweight_num_neighbors,
     )
+    run_name = anomaly_cfg.get("artifact_name", run_name)
     if not args.metrics_only:
         detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
@@ -327,10 +405,8 @@ def main() -> None:
         return
 
     # Save one example heatmap per defect type (plus "good") for a qualitative check.
-    # Colors are anchored to the same image-level threshold used for the printed
-    # Prediction below, so the heatmap's warm/cool split visually matches the
-    # reported decision. vmin/vmax use the actual per-pixel value range (not the
-    # image-level score range).
+    # Colors are anchored to the calibrated pixel-localization threshold.
+    # The separate image-level threshold controls the printed prediction.
     vmin = float(min(m.min().item() for m in anomaly_maps))
     vmax = float(max(m.max().item() for m in anomaly_maps))
     seen_defect_types = set()
@@ -354,7 +430,7 @@ def main() -> None:
             vmin=vmin,
             vmax=vmax,
             gt_mask=example_gt_mask,
-            threshold=threshold,
+            threshold=pixel_metrics["pixel_threshold"],
         )
         saved_examples.append(out_path)
         print(f"[{defect_type}] Anomaly score: {score:.2f} | Prediction: {prediction} | Heatmap: {out_path}")

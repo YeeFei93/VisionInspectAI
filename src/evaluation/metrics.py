@@ -82,6 +82,7 @@ def compute_dice(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
 def compute_pixel_level_metrics(
     anomaly_maps: Sequence[np.ndarray],
     gt_masks: Sequence[np.ndarray],
+    pixel_threshold: Optional[float] = None,
 ) -> dict:
     """Pixel-level AUROC over every test pixel (does the heatmap highlight
     true defect pixels?), plus mean IoU and mean Dice at the Youden's-J
@@ -93,7 +94,8 @@ def compute_pixel_level_metrics(
     pixel_labels = np.concatenate([m.ravel() for m in gt_masks]).astype(int)
 
     pixel_auroc = roc_auc_score(pixel_labels, pixel_scores)
-    pixel_threshold = youden_threshold(pixel_labels, pixel_scores)
+    if pixel_threshold is None:
+        pixel_threshold = youden_threshold(pixel_labels, pixel_scores)
 
     iou_scores, dice_scores = [], []
     for anomaly_map, gt_mask in zip(anomaly_maps, gt_masks):

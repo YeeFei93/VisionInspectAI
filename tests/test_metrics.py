@@ -80,3 +80,20 @@ def test_compute_pixel_level_metrics_perfect_localization():
     assert result["pixel_auroc"] == 1.0
     assert result["mean_iou"] == 1.0
     assert result["mean_dice"] == 1.0
+
+
+def test_compute_pixel_level_metrics_accepts_fixed_threshold():
+    anomaly_maps = [
+        np.array([[0.1, 0.4], [0.6, 0.9]]),
+    ]
+    gt_masks = [
+        np.array([[0, 0], [0, 1]], dtype=np.uint8),
+    ]
+
+    result = compute_pixel_level_metrics(
+        anomaly_maps, gt_masks, pixel_threshold=0.8
+    )
+
+    assert result["pixel_threshold"] == 0.8
+    assert result["mean_iou"] == 1.0
+    assert result["mean_dice"] == 1.0
