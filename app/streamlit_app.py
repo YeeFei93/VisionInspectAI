@@ -29,6 +29,7 @@ from src.inference.inspection_pipeline import (  # noqa: E402
     InspectionSetupError,
     LowCategoryConfidenceError,
 )
+from src.visualization.heatmap import create_defect_type_overlay  # noqa: E402
 
 
 def load_as_rgb(uploaded_file) -> Image.Image:
@@ -118,18 +119,47 @@ def main() -> None:
     if result.category != result.detected_category:
         st.caption(f"Using manually selected category: **{result.category}**")
 
-    image_col, heatmap_col, overlay_col = st.columns(3)
-    image_col.image(result.resized_image, caption="Original", use_container_width=True)
-    heatmap_col.image(
-        result.heatmap,
-        caption="PatchCore response (yellow-red = primary predicted region)",
-        use_container_width=True,
-    )
-    overlay_col.image(
-        result.overlay,
-        caption="Primary predicted region (approximate, not pixel-exact)",
-        use_container_width=True,
-    )
+    st.subheader("Image Analysis")
+    
+    # Determine if we should show the color-coded defect type overlay
+    show_defect_types_overlay = result.prediction == "Defective" and len(result.distinct_defect_regions) > 0
+    image_size = result.resized_image.size[0]
+    
+    if show_defect_types_overlay:
+        # 4-column layout: Original | Heatmap | Defect Types | Overlay
+        image_col, heatmap_col, defect_col, overlay_col = st.columns(4)
+        
+        # Create the color-coded defect type overlay
+        defect_colored_mask, defect_type_overlay, type_to_color = create_defect_type_overlay(
+            result.resized_image, result.distinct_defect_regions, image_size, alpha=0.5
+        )
+        
+        image_col.image(result.resized_image, caption="Original", use_container_width=True)
+        heatmap_col.image(
+            result.heatmap,
+            caption="Anomaly heatmap",
+            use_container_width=True,
+        )
+        defect_col.image(
+            defect_type_overlay,
+            caption="Defect type overlay (color-coded)",
+            use_container_width=True,
+        )
+        overlay_col.image(result.overlay, caption="Heatmap overlay", use_container_width=True)
+    else:
+        # 3-column layout: Original | Heatmap | Overlay
+        image_col, heatmap_col, overlay_col = st.columns(3)
+        image_col.image(result.resized_image, caption="Original", use_container_width=True)
+        heatmap_col.image(
+            result.heatmap,
+            caption="PatchCore response (yellow-red = primary predicted region)",
+            use_container_width=True,
+        )
+        overlay_col.image(
+            result.overlay,
+            caption="Primary predicted region (approximate, not pixel-exact)",
+            use_container_width=True,
+        )
 
     st.subheader("Result")
     prediction_col, score_col, severity_col = st.columns(3)
@@ -167,8 +197,9 @@ def main() -> None:
                 st.write(f"- {region.defect_type} — confidence {region.confidence:.0%}, region area {region.area}px")
             st.caption(
                 "Each anomalous region (connected component of the heatmap above the threshold) is cropped "
-                "and classified independently, since MVTec-AD's own labels don't break a 'combined' image "
-                "down into its individual defect types."
+                "and classified independently. The color-coded defect type overlay above visually shows which "
+                "color represents each defect type. MVTec-AD's labels don't break a 'combined' image down into "
+                "individual defect types, so this is an approximate visual breakdown."
             )
         st.error(f"{result.severity_reason} Review the red overlay for the likely defect region.")
     else:
