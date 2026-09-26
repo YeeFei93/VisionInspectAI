@@ -118,15 +118,27 @@ def plot_confusion_matrix(
     y_pred: Sequence[int],
     class_names: Sequence[str] = ("good", "defective"),
     output_path: Optional[Path] = None,
+    title: str = "Confusion matrix",
+    figsize: Optional[tuple] = None,
 ):
     import matplotlib.pyplot as plt
 
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
 
-    fig, ax = plt.subplots(figsize=(4, 4))
-    disp.plot(ax=ax, cmap="Blues", colorbar=False)
-    ax.set_title("Baseline classifier — confusion matrix")
+    if figsize is None:
+        # Auto-size and rotate labels so many-class matrices (e.g. the 15-category
+        # classifier) stay readable instead of the tick labels overlapping.
+        side = max(4.0, 0.5 * len(class_names) + 2.0)
+        figsize = (side, side)
+    fig, ax = plt.subplots(figsize=figsize)
+    disp.plot(
+        ax=ax,
+        cmap="Blues",
+        colorbar=False,
+        xticks_rotation="vertical" if len(class_names) > 4 else "horizontal",
+    )
+    ax.set_title(title)
     fig.tight_layout()
 
     if output_path is not None:
