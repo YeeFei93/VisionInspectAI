@@ -2,8 +2,9 @@
 top of the original image."""
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -82,6 +83,127 @@ def make_overlay(
     overlay = (alpha * heatmap_rgb + (1 - alpha) * image_np).astype(np.uint8)
 
     return normalized, heatmap_rgb, overlay
+
+
+def create_defect_type_overlay(
+    original_image: Image.Image,
+    regions: List,
+    image_size: int,
+    alpha: float = 0.5,
+) -> tuple:
+    """Create a color-coded segmentation overlay for multiple defect types.
+    
+    Takes a list of DefectRegion objects and assigns a distinct color to each
+    defect type, creating a categorical overlay that highlights which types
+    of defects are present and where.
+    
+    Args:
+        original_image: PIL Image (must match image_size)
+        regions: List of DefectRegion objects from defect_regions.classify_defect_regions()
+        image_size: Size of the segmentation mask (should match original_image)
+        alpha: Transparency of overlay (0=original only, 1=fully opaque colors)
+    
+    Returns:
+        Tuple of (colored_mask, overlay_image, type_to_color_dict)
+        - colored_mask: (H, W, 3) uint8 RGB array with color-coded regions
+        - overlay_image: (H, W, 3) uint8 RGB blend of original and colored mask
+        - type_to_color_dict: dict mapping defect_type -> (R, G, B) color tuple
+    """
+    # Categorical palette: tab10 gives 10 maximally distinct hues (unlike
+    # tab20c, which groups colors in same-hue shade blocks of 4 and looks
+    # near-identical for a handful of types). Fall back to an evenly spaced
+    # HSV sweep if a category ever has more than 10 defect types.
+    unique_types = sorted(set(r.defect_type for r in regions))
+    if len(unique_types) <= 10:
+        colors_float = plt.get_cmap("tab10")(np.linspace(0, 1, 10))[:, :3]
+    else:
+        colors_float = plt.get_cmap("hsv")(np.linspace(0, 1, len(unique_types), endpoint=False))[:, :3]
+    colors_uint8 = (colors_float * 255).astype(np.uint8)
+    
+    # Map unique defect types to colors
+    type_to_color = {
+        defect_type: tuple(colors_uint8[i % len(colors_uint8)])
+        for i, defect_type in enumerate(unique_types)
+    }
+    
+    # Create empty colored segmentation mask
+    colored_mask = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+    
+    # Fill each region with its defect type's color
+    for region in regions:
+        x, y, w, h = region.bbox
+        # Ensure coordinates are integers
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        color = type_to_color[region.defect_type]
+        # colored_mask is RGB (blended with RGB image_np, shown via st.image as
+        # RGB) -- pass the color through as-is, no BGR swap, so it matches the legend.
+        color_rgb = (int(color[0]), int(color[1]), int(color[2]))
+        # Draw filled rectangle in the color for this defect type
+        cv2.rectangle(colored_mask, (x, y), (x + w, y + h), color_rgb, thickness=-1)
+    
+    # Blend with original image
+    image_np = np.array(original_image.convert("RGB"))
+    overlay = (alpha * colored_mask.astype(np.float32) + 
+               (1 - alpha) * image_np.astype(np.float32)).astype(np.uint8)
+    
+    return colored_mask, overlay, type_to_color
+
+
+def save_defect_type_heatmap(
+    original_image: Image.Image,
+    regions: List,
+    image_size: int,
+    output_path: Path,
+    alpha: float = 0.5,
+) -> None:
+    """Save a multi-panel figure showing defect-type segmentation.
+    
+    Displays: original | colored segmentation | overlay, with a legend showing
+    defect types, colors, and confidences.
+    
+    Args:
+        original_image: PIL Image
+        regions: List of DefectRegion objects (sorted by confidence, highest first)
+        image_size: Size of segmentation mask
+        output_path: Path to save the figure
+        alpha: Overlay transparency
+    """
+    colored_mask, overlay, type_to_color = create_defect_type_overlay(
+        original_image, regions, image_size, alpha=alpha
+    )
+    
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Original image
+    axes[0].imshow(np.array(original_image.convert("RGB")))
+    axes[0].set_title("Original")
+    axes[0].axis("off")
+    
+    # Colored segmentation with legend
+    axes[1].imshow(colored_mask)
+    axes[1].set_title("Defect Type Segmentation")
+    axes[1].axis("off")
+    
+    # Create legend
+    legend_elements = []
+    for region in regions:
+        color_rgb = tuple(c / 255.0 for c in type_to_color[region.defect_type])
+        label = f"{region.defect_type} (conf: {region.confidence:.2f})"
+        from matplotlib.patches import Patch
+        legend_elements.append(Patch(facecolor=color_rgb, label=label))
+    
+    axes[1].legend(handles=legend_elements, loc="upper right", fontsize=9)
+    
+    # Overlay
+    axes[2].imshow(overlay)
+    axes[2].set_title(f"Overlay (α={alpha})")
+    axes[2].axis("off")
+    
+    fig.tight_layout()
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_anomaly_heatmap(
