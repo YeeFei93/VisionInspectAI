@@ -52,11 +52,24 @@ def compute_per_class_report(
 
 def youden_threshold(y_true: Sequence[int], scores: Sequence[float]) -> float:
     """Threshold that maximizes Youden's J statistic (TPR - FPR) on the ROC
-    curve. Used to turn continuous anomaly scores into good/defective
-    decisions at either the image level or the pixel level."""
+    curve. Requires labelled defects, so it can only be computed on a
+    labelled (test or reserved labelled-calibration) set -- computing it on
+    the final test set itself leaks that set into the decision threshold.
+    Kept for the legacy/non-calibration code path; prefer
+    `percentile_threshold` on a held-out normal-only calibration split."""
     fpr, tpr, thresholds = roc_curve(y_true, scores)
     j_scores = tpr - fpr
     return float(thresholds[np.argmax(j_scores)])
+
+
+def percentile_threshold(scores: Sequence[float], percentile: float) -> float:
+    """Threshold at a given percentile of a normal-only score distribution.
+    Used for calibration-based threshold selection: fit the score
+    distribution on held-out normal (never train/never test) images, then
+    pick the threshold that keeps roughly `100 - percentile` percent of
+    those normal images as false alarms. Unlike `youden_threshold`, this
+    needs no labelled defects and never touches the final test set."""
+    return float(np.percentile(np.asarray(scores), percentile))
 
 
 def compute_iou(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:

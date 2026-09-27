@@ -8,6 +8,7 @@ from src.evaluation.metrics import (
     compute_iou,
     compute_metrics_vs_threshold,
     compute_pixel_level_metrics,
+    percentile_threshold,
     youden_threshold,
 )
 
@@ -37,6 +38,21 @@ def test_youden_threshold_separates_perfectly_separable_scores():
     threshold = youden_threshold(y_true, scores)
     preds = [1 if s >= threshold else 0 for s in scores]
     assert preds == y_true
+
+
+def test_percentile_threshold_matches_numpy_percentile():
+    scores = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert percentile_threshold(scores, 50.0) == np.percentile(scores, 50.0)
+
+
+def test_percentile_threshold_never_looks_at_labels():
+    # Normal-only calibration: only takes scores, no labelled defects needed.
+    normal_scores = np.array([0.1, 0.2, 0.2, 0.3, 0.9])
+    threshold = percentile_threshold(normal_scores, 80.0)
+    assert threshold == np.percentile(normal_scores, 80.0)
+    # False-alarm rate at this threshold on the same normal scores is <= 20%.
+    false_alarm_rate = (normal_scores >= threshold).mean()
+    assert false_alarm_rate <= 0.2 + 1e-9
 
 
 def test_compute_iou_identical_masks_is_one():

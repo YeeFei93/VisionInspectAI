@@ -25,6 +25,11 @@ anomaly_detection:
   projection_dim: 128
   batch_size: 16
   use_foreground_mask: false
+  # Normal-only threshold calibration (see README threshold-calibration section).
+  calibration:
+    enabled: true
+    holdout_ratio: 0.2
+    percentile: 95.0
 
 output:
   checkpoint_dir: models/checkpoints
