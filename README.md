@@ -125,6 +125,13 @@ python -m src.models.train_defect_classifier --config config/screw_config.yaml
 # Screw option: train on deployment-matched PatchCore defect crops
 python -m src.models.train_defect_classifier --config config/screw_config.yaml \
   --defect-focused-crops --crop-source patchcore
+
+# Wood/transistor option: tiny defect classes (e.g. wood's `color` has only 8 images) —
+# nested holdout + stratified K-fold CV to pick settings, then one final fit evaluated once on the holdout
+python -m src.models.train_defect_classifier --config config/wood_config.yaml \
+  --freeze-backbone --holdout-per-class 2 --cross-validation --folds 4
+python -m src.models.train_defect_classifier --config config/wood_config.yaml \
+  --freeze-backbone --holdout-per-class 2
 **Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for 10 epochs. Training seeds NumPy/PyTorch from `data.seed` so full-image and crop experiments are reproducible.
 
 Add `--defect-focused-crops --crop-source patchcore` to crop each image around the region above the saved PatchCore pixel threshold before resize/augmentation. This uses the same predicted localization available in Streamlit, with 25% context padding and a minimum crop side of 25% of the shorter image dimension by default. `--crop-source ground-truth` is available as an oracle ablation, but its validation score is not a deployment estimate because uploaded images have no ground-truth masks.
@@ -341,6 +348,8 @@ Training is seeded (`--seed`, default 42), evaluates on the validation split eve
 **What it does:** unlike the Step 2 good/defective classifier, this only looks at a single category's *defective* test/ rows and predicts which `defect_type` it is (e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`), on a stratified train/val split over just those defect types.
 
 **Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for up to 10 epochs. Training seeds NumPy/PyTorch from `data.seed`, evaluates on the validation split every epoch, restores the lowest-val-loss epoch's weights before saving, and early-stops after `train.early_stopping_patience` (default 3) epochs without improvement. `--freeze-backbone` freezes everything except the classification head (~2k trainable parameters instead of ~11M) as an overfitting control, `--learning-rate` overrides the config's LR (a frozen head needs a much higher LR than fine-tuning), and `--epochs` overrides the config's epoch budget (useful to confirm val loss has actually plateaued rather than just hitting the default epoch count).
+
+For categories with very few images in their smallest defect class (transistor: 10/class; wood: `color` has only 8), a plain train/val split is too noisy to trust (see the Notes & Lessons Learned entry below). Use `--holdout-per-class N` to reserve `N` images/defect type as a final untouched test set, and `--cross-validation --folds K` to run stratified K-fold CV on the remaining development set for model selection (evaluation-only — no checkpoint saved, `--folds` can't exceed the smallest dev-class count). Once settings are chosen, rerun with `--holdout-per-class N` alone (no `--cross-validation`) to fit the deployable checkpoint on all dev images and evaluate it once on the holdout.
 
 **Output** (named `defect_classifier_<architecture>_<category>`):
 - `models/checkpoints/defect_classifier_<architecture>_<category>.pt` — model state dict (best-validation-loss epoch).

@@ -50,6 +50,7 @@ class DefectPrediction:
     defect_type: str
     confidence: float
     area: int | None = None
+    bbox: tuple | None = None  # (x, y, w, h) in resized-image coordinates, only set for distinct_defect_regions
 
 
 @dataclass
@@ -231,7 +232,7 @@ class InspectionPipeline:
                 )
                 distinct_regions = [
                     DefectPrediction(
-                        region.defect_type, region.confidence, region.area
+                        region.defect_type, region.confidence, region.area, region.bbox
                     )
                     for region in summarize_distinct_types(regions)
                     if should_make_prediction(region.confidence)
