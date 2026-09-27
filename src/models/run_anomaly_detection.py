@@ -1,9 +1,22 @@
 """Train and evaluate the main PatchCore anomaly detection model.
 
-Trained only on train/good (no labels needed); evaluated on the full
-test/ split (good + every defect type). For each test image this produces
-an image-level anomaly score, a good/defective prediction, and a heatmap
-highlighting the suspected defect region.
+Trained only on a subset of train/good (no labels needed); evaluated on
+the full test/ split (good + every defect type). For each test image this
+produces an image-level anomaly score, a good/defective prediction, and a
+heatmap highlighting the suspected defect region.
+
+When `anomaly_detection.calibration.enabled: true` is set in the config (or
+--calibration is passed), the image/pixel thresholds are chosen with
+normal-only calibration: train/good is split into a memory-bank fitting
+subset and a held-out calibration subset, the threshold is the Nth
+percentile of the calibration subset's (label-free) scores, and the full
+test set is only scored once at the end with that frozen threshold -- it
+is never used to choose a threshold. This is opt-in, per category (like
+`use_foreground_mask`), because it changes what the memory bank is fit on
+and is not automatically appropriate for every ablation/tuning config in
+this repo. When disabled (the default), thresholds fall back to the
+legacy behavior of picking the threshold via Youden's J directly on the
+test set.
 
 Usage:
     python -m src.models.run_anomaly_detection --config config/screw_config.yaml
@@ -24,6 +37,10 @@ from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import (
     compute_classification_metrics,
     compute_pixel_level_metrics,
+    percentile_threshold,
+    plot_confusion_matrix,
+    plot_metric_vs_threshold,
+    plot_score_distribution,
     youden_threshold,
 )
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
@@ -41,6 +58,9 @@ DEFAULT_PROJECTION_DIM = 128
 DEFAULT_LAYERS = ("layer2", "layer3")
 DEFAULT_NUM_NEIGHBORS = 1
 DEFAULT_REWEIGHT_NUM_NEIGHBORS = 9
+DEFAULT_CALIBRATION_ENABLED = False
+DEFAULT_CALIBRATION_HOLDOUT_RATIO = 0.2
+DEFAULT_CALIBRATION_PERCENTILE = 95.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,6 +120,28 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Memory neighborhood size for softmax reweighting (default: 9).",
     )
+    parser.add_argument(
+        "--calibration",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Choose thresholds via normal-only calibration split instead of "
+            "test-set Youden's J (default: off unless anomaly_detection.calibration.enabled "
+            "is set in the config)."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-holdout-ratio",
+        type=float,
+        default=None,
+        help="Fraction of train/good held out for calibration (default: 0.2).",
+    )
+    parser.add_argument(
+        "--calibration-percentile",
+        type=float,
+        default=None,
+        help="Percentile of calibration normal scores used as the threshold (default: 95).",
+    )
     return parser.parse_args()
 
 
@@ -115,6 +157,46 @@ def load_gt_mask(mask_path, image_size: int) -> np.ndarray:
         return np.zeros((image_size, image_size), dtype=np.uint8)
     mask_img = Image.open(mask_path).convert("L").resize((image_size, image_size), Image.NEAREST)
     return (np.array(mask_img) > 127).astype(np.uint8)
+
+
+def split_calibration_rows(train_rows, holdout_ratio: float, seed: int):
+    """Deterministically split train/good rows into a memory-bank fitting
+    subset and a held-out normal calibration subset, so image/pixel
+    thresholds are chosen without ever looking at the final test set."""
+    if not 0.0 < holdout_ratio < 1.0:
+        raise ValueError("calibration.holdout_ratio must be between 0 and 1 (exclusive)")
+    n_total = len(train_rows)
+    n_calibration = max(1, round(n_total * holdout_ratio))
+    if n_calibration >= n_total:
+        raise ValueError("calibration.holdout_ratio leaves no images to fit the memory bank")
+    rng = np.random.default_rng(seed)
+    shuffled_indices = rng.permutation(n_total)
+    calibration_indices = shuffled_indices[:n_calibration]
+    fit_indices = shuffled_indices[n_calibration:]
+    fit_rows = train_rows.iloc[fit_indices].reset_index(drop=True)
+    calibration_rows = train_rows.iloc[calibration_indices].reset_index(drop=True)
+    return fit_rows, calibration_rows
+
+
+def score_rows(rows, detector, transform, image_size: int, use_foreground_mask: bool):
+    """Run the fitted detector over every row, returning parallel lists of
+    image scores and upsampled anomaly maps."""
+    scores, anomaly_maps = [], []
+    for _, row in rows.iterrows():
+        image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
+        resized_image = image.resize((image_size, image_size))
+        input_tensor = transform(image).unsqueeze(0)
+
+        foreground_mask = None
+        if use_foreground_mask:
+            foreground_mask = torch.from_numpy(
+                compute_foreground_mask(resized_image, image_size)
+            ).unsqueeze(0)
+
+        result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
+        scores.append(result.image_score)
+        anomaly_maps.append(result.anomaly_map)
+    return scores, anomaly_maps
 
 
 def build_run_name(
@@ -168,6 +250,37 @@ def main() -> None:
     train_rows = manifest[(manifest["split"] == "train") & (manifest["label"] == 0)].reset_index(drop=True)
     test_rows = manifest[manifest["split"] == "test"].reset_index(drop=True)
 
+    seed = args.seed if args.seed is not None else anomaly_cfg.get("seed", data_cfg["seed"])
+    calibration_cfg = anomaly_cfg.get("calibration", {})
+    calibration_enabled = (
+        args.calibration
+        if args.calibration is not None
+        else calibration_cfg.get("enabled", DEFAULT_CALIBRATION_ENABLED)
+    )
+    calibration_holdout_ratio = (
+        args.calibration_holdout_ratio
+        if args.calibration_holdout_ratio is not None
+        else calibration_cfg.get("holdout_ratio", DEFAULT_CALIBRATION_HOLDOUT_RATIO)
+    )
+    calibration_percentile = (
+        args.calibration_percentile
+        if args.calibration_percentile is not None
+        else calibration_cfg.get("percentile", DEFAULT_CALIBRATION_PERCENTILE)
+    )
+    calibration_seed = calibration_cfg.get("seed", seed)
+
+    if calibration_enabled:
+        fit_rows, calibration_rows = split_calibration_rows(
+            train_rows, calibration_holdout_ratio, calibration_seed
+        )
+        print(
+            f"Calibration split: {len(fit_rows)} fitting / {len(calibration_rows)} "
+            f"held-out normal calibration images (holdout ratio "
+            f"{calibration_holdout_ratio:.2f}, target percentile {calibration_percentile:.1f})"
+        )
+    else:
+        fit_rows, calibration_rows = train_rows, None
+
     image_size = data_cfg["image_size"]
     transform = get_val_transforms(image_size)
     train_augmentation_cfg = anomaly_cfg.get("train_augmentation", {})
@@ -181,12 +294,12 @@ def main() -> None:
         )
 
     base_train_dataset = ManifestImageDataset(
-        train_rows, PROJECT_ROOT, transform=transform
+        fit_rows, PROJECT_ROOT, transform=transform
     )
     train_dataset = base_train_dataset
     if augmentation_copies > 0:
         augmented_dataset = ManifestImageDataset(
-            train_rows,
+            fit_rows,
             PROJECT_ROOT,
             transform=get_patchcore_train_transforms(
                 image_size, translate_ratio=translate_ratio
@@ -206,7 +319,6 @@ def main() -> None:
     )
     print(f"Using device: {device}")
     projection_method = args.projection_method or anomaly_cfg.get("projection_method", "random")
-    seed = args.seed if args.seed is not None else anomaly_cfg.get("seed", data_cfg["seed"])
     max_coreset_size = (
         args.max_coreset_size
         if args.max_coreset_size is not None
@@ -279,31 +391,49 @@ def main() -> None:
 
     use_foreground_mask = anomaly_cfg.get("use_foreground_mask", True)
     mask_note = "background masked out via foreground segmentation" if use_foreground_mask else "foreground masking disabled"
+
+    image_threshold = None
+    pixel_threshold = None
+    if calibration_enabled:
+        print(f"Scoring {len(calibration_rows)} held-out normal calibration images ({mask_note})...")
+        calibration_scores, calibration_anomaly_maps = score_rows(
+            calibration_rows, detector, transform, image_size, use_foreground_mask
+        )
+        image_threshold = percentile_threshold(calibration_scores, calibration_percentile)
+        calibration_pixel_scores = np.concatenate(
+            [m.numpy().ravel() for m in calibration_anomaly_maps]
+        )
+        pixel_threshold = percentile_threshold(calibration_pixel_scores, calibration_percentile)
+        print(
+            f"Calibrated thresholds at the {calibration_percentile:.1f}th percentile of "
+            f"held-out normal scores -- image: {image_threshold:.4f}, pixel: {pixel_threshold:.4f}"
+        )
+        print("Freezing model + thresholds; evaluating once on the full test set...")
+
     print(f"Scoring {len(test_rows)} test images ({mask_note})...")
-    scores, labels, anomaly_maps = [], [], []
-    for _, row in test_rows.iterrows():
-        image = Image.open(PROJECT_ROOT / row["image_path"]).convert("RGB")
-        resized_image = image.resize((image_size, image_size))
-        input_tensor = transform(image).unsqueeze(0)
-
-        foreground_mask = None
-        if use_foreground_mask:
-            foreground_mask = torch.from_numpy(compute_foreground_mask(resized_image, image_size)).unsqueeze(0)
-
-        result = detector.predict(input_tensor, foreground_masks=foreground_mask)[0]
-        scores.append(result.image_score)
-        anomaly_maps.append(result.anomaly_map)
-        labels.append(int(row["label"]))
+    scores, anomaly_maps = score_rows(test_rows, detector, transform, image_size, use_foreground_mask)
+    labels = test_rows["label"].astype(int).tolist()
 
     scores_arr = np.array(scores)
     labels_arr = np.array(labels)
 
     auroc = roc_auc_score(labels_arr, scores_arr)
-    threshold = youden_threshold(labels_arr, scores_arr)
+    threshold = image_threshold if calibration_enabled else youden_threshold(labels_arr, scores_arr)
     predictions = (scores_arr >= threshold).astype(int)
     metrics = compute_classification_metrics(labels_arr, predictions)
     metrics["auroc"] = float(auroc)
     metrics["threshold"] = float(threshold)
+    metrics["threshold_method"] = (
+        "calibration_percentile" if calibration_enabled else "youden_test"
+    )
+    metrics["calibration"] = {
+        "enabled": calibration_enabled,
+        "holdout_ratio": calibration_holdout_ratio,
+        "percentile": calibration_percentile,
+        "seed": calibration_seed,
+        "num_fit_images": len(fit_rows),
+        "num_calibration_images": len(calibration_rows) if calibration_enabled else 0,
+    }
     metrics["score_min"] = float(scores_arr.min())
     metrics["score_max"] = float(scores_arr.max())
     metrics["projection_method"] = projection_method
@@ -328,7 +458,10 @@ def main() -> None:
     }
 
     print(f"Image-level ROC-AUC: {auroc:.4f}")
-    print(f"Chosen threshold (Youden's J): {threshold:.4f}")
+    if calibration_enabled:
+        print(f"Chosen threshold (calibration {calibration_percentile:.1f}th percentile): {threshold:.4f}")
+    else:
+        print(f"Chosen threshold (Youden's J on test set - legacy): {threshold:.4f}")
 
     # Pixel-level localization: predicted heatmap vs ground_truth mask.
     print("Loading ground-truth masks for pixel-level evaluation...")
@@ -340,7 +473,11 @@ def main() -> None:
         for _, row in test_rows.iterrows()
     ]
     anomaly_maps_np = [m.numpy() for m in anomaly_maps]
-    pixel_metrics = compute_pixel_level_metrics(anomaly_maps_np, gt_masks)
+    pixel_metrics = compute_pixel_level_metrics(
+        anomaly_maps_np,
+        gt_masks,
+        pixel_threshold=pixel_threshold if calibration_enabled else None,
+    )
     if anomaly_cfg.get("keep_primary_region", False):
         calibration_threshold = pixel_metrics["pixel_threshold"]
         raw_mean_iou = pixel_metrics["mean_iou"]
@@ -378,7 +515,8 @@ def main() -> None:
     checkpoint_dir = PROJECT_ROOT / output_cfg["checkpoint_dir"]
     metrics_dir = PROJECT_ROOT / output_cfg["metrics_dir"]
     heatmaps_dir = PROJECT_ROOT / output_cfg.get("heatmaps_dir", "outputs/heatmaps")
-    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir):
+    figures_dir = PROJECT_ROOT / output_cfg.get("figures_dir", "outputs/figures")
+    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir, figures_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     run_name = build_run_name(
@@ -399,6 +537,47 @@ def main() -> None:
     if not args.metrics_only:
         detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    if calibration_enabled:
+        calibration_split_path = metrics_dir / f"{run_name}_calibration_split.json"
+        calibration_split_path.write_text(
+            json.dumps(
+                {
+                    "category": category,
+                    "seed": calibration_seed,
+                    "holdout_ratio": calibration_holdout_ratio,
+                    "percentile": calibration_percentile,
+                    "fit_image_paths": fit_rows["image_path"].tolist(),
+                    "calibration_image_paths": calibration_rows["image_path"].tolist(),
+                    "image_threshold": float(image_threshold),
+                    "pixel_threshold": float(pixel_threshold),
+                },
+                indent=2,
+            )
+        )
+        print(f"Saved calibration split + thresholds to {calibration_split_path}")
+
+    plot_confusion_matrix(
+        labels_arr,
+        predictions,
+        output_path=figures_dir / f"{run_name}_confusion_matrix.png",
+        title=f"PatchCore ({category}) — confusion matrix",
+    )
+    plot_score_distribution(
+        scores_arr,
+        labels_arr,
+        threshold=threshold,
+        output_path=figures_dir / f"{run_name}_score_distribution.png",
+        title=f"PatchCore ({category}) — anomaly score distribution",
+    )
+    plot_metric_vs_threshold(
+        labels_arr,
+        scores_arr,
+        chosen_threshold=threshold,
+        output_path=figures_dir / f"{run_name}_metric_vs_threshold.png",
+        title=f"PatchCore ({category}) — metrics vs threshold",
+    )
+    print(f"Saved evaluation figures to {figures_dir}")
 
     if args.metrics_only:
         print(f"Saved metrics to {metrics_dir / f'{run_name}_metrics.json'}")

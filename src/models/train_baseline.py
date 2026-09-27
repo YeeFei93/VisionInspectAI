@@ -257,7 +257,9 @@ def main() -> None:
         metrics_path = metrics_dir / f"{run_name}_cv{args.folds}_metrics.json"
         metrics_path.write_text(json.dumps(metrics, indent=2))
         figure_path = figures_dir / f"{run_name}_cv{args.folds}_confusion_matrix.png"
-        plot_confusion_matrix(y_true, y_pred, output_path=figure_path)
+        plot_confusion_matrix(
+            y_true, y_pred, output_path=figure_path, title="Baseline classifier — confusion matrix"
+        )
         print("\nCross-validation aggregate metrics:")
         print(json.dumps(metrics["aggregate"], indent=2))
         print(f"Saved cross-validation metrics to {metrics_path}")
@@ -285,7 +287,7 @@ def main() -> None:
     metrics_path.write_text(json.dumps(metrics, indent=2))
 
     figure_path = figures_dir / f"{run_name}_confusion_matrix.png"
-    plot_confusion_matrix(y_true, y_pred, output_path=figure_path)
+    plot_confusion_matrix(y_true, y_pred, output_path=figure_path, title="Baseline classifier — confusion matrix")
 
     loss_curve_path = figures_dir / f"{run_name}_loss_curve.png"
     plot_training_curves(training_summary["history"], output_path=loss_curve_path)

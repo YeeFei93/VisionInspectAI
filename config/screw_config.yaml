@@ -30,6 +30,14 @@ anomaly_detection:
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
+  # Normal-only threshold calibration (see README threshold-calibration section):
+  # 80% of train/good fits the memory bank, 20% is held out to pick the image
+  # and pixel thresholds at the 95th percentile of their scores, and the full
+  # MVTec test set is only scored once at the end with those frozen thresholds.
+  calibration:
+    enabled: true
+    holdout_ratio: 0.2
+    percentile: 95.0
 
 output:
   checkpoint_dir: models/checkpoints

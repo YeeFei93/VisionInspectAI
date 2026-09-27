@@ -52,11 +52,24 @@ def compute_per_class_report(
 
 def youden_threshold(y_true: Sequence[int], scores: Sequence[float]) -> float:
     """Threshold that maximizes Youden's J statistic (TPR - FPR) on the ROC
-    curve. Used to turn continuous anomaly scores into good/defective
-    decisions at either the image level or the pixel level."""
+    curve. Requires labelled defects, so it can only be computed on a
+    labelled (test or reserved labelled-calibration) set -- computing it on
+    the final test set itself leaks that set into the decision threshold.
+    Kept for the legacy/non-calibration code path; prefer
+    `percentile_threshold` on a held-out normal-only calibration split."""
     fpr, tpr, thresholds = roc_curve(y_true, scores)
     j_scores = tpr - fpr
     return float(thresholds[np.argmax(j_scores)])
+
+
+def percentile_threshold(scores: Sequence[float], percentile: float) -> float:
+    """Threshold at a given percentile of a normal-only score distribution.
+    Used for calibration-based threshold selection: fit the score
+    distribution on held-out normal (never train/never test) images, then
+    pick the threshold that keeps roughly `100 - percentile` percent of
+    those normal images as false alarms. Unlike `youden_threshold`, this
+    needs no labelled defects and never touches the final test set."""
+    return float(np.percentile(np.asarray(scores), percentile))
 
 
 def compute_iou(pred_mask: np.ndarray, gt_mask: np.ndarray) -> float:
@@ -118,15 +131,116 @@ def plot_confusion_matrix(
     y_pred: Sequence[int],
     class_names: Sequence[str] = ("good", "defective"),
     output_path: Optional[Path] = None,
+    title: str = "Confusion matrix",
+    figsize: Optional[tuple] = None,
 ):
     import matplotlib.pyplot as plt
 
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
 
-    fig, ax = plt.subplots(figsize=(4, 4))
-    disp.plot(ax=ax, cmap="Blues", colorbar=False)
-    ax.set_title("Baseline classifier — confusion matrix")
+    if figsize is None:
+        # Auto-size and rotate labels so many-class matrices (e.g. the 15-category
+        # classifier) stay readable instead of the tick labels overlapping.
+        side = max(4.0, 0.5 * len(class_names) + 2.0)
+        figsize = (side, side)
+    fig, ax = plt.subplots(figsize=figsize)
+    disp.plot(
+        ax=ax,
+        cmap="Blues",
+        colorbar=False,
+        xticks_rotation="vertical" if len(class_names) > 4 else "horizontal",
+    )
+    ax.set_title(title)
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path)
+
+    return fig
+
+
+def compute_metrics_vs_threshold(
+    y_true: Sequence[int], scores: Sequence[float], num_thresholds: int = 50
+) -> dict:
+    """Accuracy/precision/recall/F1 swept over a range of thresholds spanning
+    the observed scores, for visualizing how sensitive the good/defective
+    decision is to the chosen cut-off."""
+    y_true = np.asarray(y_true)
+    scores = np.asarray(scores)
+    thresholds = np.linspace(scores.min(), scores.max(), num_thresholds)
+    accuracy, precision, recall, f1 = [], [], [], []
+    for t in thresholds:
+        preds = (scores >= t).astype(int)
+        accuracy.append(accuracy_score(y_true, preds))
+        precision.append(precision_score(y_true, preds, zero_division=0))
+        recall.append(recall_score(y_true, preds, zero_division=0))
+        f1.append(f1_score(y_true, preds, zero_division=0))
+    return {
+        "thresholds": thresholds.tolist(),
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def plot_metric_vs_threshold(
+    y_true: Sequence[int],
+    scores: Sequence[float],
+    chosen_threshold: Optional[float] = None,
+    num_thresholds: int = 50,
+    output_path: Optional[Path] = None,
+    title: str = "Metrics vs threshold",
+):
+    import matplotlib.pyplot as plt
+
+    swept = compute_metrics_vs_threshold(y_true, scores, num_thresholds=num_thresholds)
+    thresholds = swept["thresholds"]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for metric_name in ("accuracy", "precision", "recall", "f1"):
+        ax.plot(thresholds, swept[metric_name], label=metric_name)
+    if chosen_threshold is not None:
+        ax.axvline(chosen_threshold, color="black", linestyle="--", label="chosen threshold")
+    ax.set_xlabel("Threshold")
+    ax.set_ylabel("Score")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path)
+
+    return fig
+
+
+def plot_score_distribution(
+    scores: Sequence[float],
+    y_true: Sequence[int],
+    threshold: Optional[float] = None,
+    class_names: Sequence[str] = ("good", "defective"),
+    output_path: Optional[Path] = None,
+    title: str = "Anomaly score distribution",
+    bins: int = 30,
+):
+    import matplotlib.pyplot as plt
+
+    scores = np.asarray(scores)
+    y_true = np.asarray(y_true)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bin_edges = np.linspace(scores.min(), scores.max(), bins + 1)
+    for label_value, name in enumerate(class_names):
+        subset = scores[y_true == label_value]
+        if subset.size:
+            ax.hist(subset, bins=bin_edges, alpha=0.6, label=name)
+    if threshold is not None:
+        ax.axvline(threshold, color="black", linestyle="--", label="threshold")
+    ax.set_xlabel("Anomaly score")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.legend()
     fig.tight_layout()
 
     if output_path is not None:
