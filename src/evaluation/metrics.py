@@ -147,6 +147,95 @@ def plot_confusion_matrix(
     return fig
 
 
+def compute_metrics_vs_threshold(
+    y_true: Sequence[int], scores: Sequence[float], num_thresholds: int = 50
+) -> dict:
+    """Accuracy/precision/recall/F1 swept over a range of thresholds spanning
+    the observed scores, for visualizing how sensitive the good/defective
+    decision is to the chosen cut-off."""
+    y_true = np.asarray(y_true)
+    scores = np.asarray(scores)
+    thresholds = np.linspace(scores.min(), scores.max(), num_thresholds)
+    accuracy, precision, recall, f1 = [], [], [], []
+    for t in thresholds:
+        preds = (scores >= t).astype(int)
+        accuracy.append(accuracy_score(y_true, preds))
+        precision.append(precision_score(y_true, preds, zero_division=0))
+        recall.append(recall_score(y_true, preds, zero_division=0))
+        f1.append(f1_score(y_true, preds, zero_division=0))
+    return {
+        "thresholds": thresholds.tolist(),
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def plot_metric_vs_threshold(
+    y_true: Sequence[int],
+    scores: Sequence[float],
+    chosen_threshold: Optional[float] = None,
+    num_thresholds: int = 50,
+    output_path: Optional[Path] = None,
+    title: str = "Metrics vs threshold",
+):
+    import matplotlib.pyplot as plt
+
+    swept = compute_metrics_vs_threshold(y_true, scores, num_thresholds=num_thresholds)
+    thresholds = swept["thresholds"]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    for metric_name in ("accuracy", "precision", "recall", "f1"):
+        ax.plot(thresholds, swept[metric_name], label=metric_name)
+    if chosen_threshold is not None:
+        ax.axvline(chosen_threshold, color="black", linestyle="--", label="chosen threshold")
+    ax.set_xlabel("Threshold")
+    ax.set_ylabel("Score")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path)
+
+    return fig
+
+
+def plot_score_distribution(
+    scores: Sequence[float],
+    y_true: Sequence[int],
+    threshold: Optional[float] = None,
+    class_names: Sequence[str] = ("good", "defective"),
+    output_path: Optional[Path] = None,
+    title: str = "Anomaly score distribution",
+    bins: int = 30,
+):
+    import matplotlib.pyplot as plt
+
+    scores = np.asarray(scores)
+    y_true = np.asarray(y_true)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bin_edges = np.linspace(scores.min(), scores.max(), bins + 1)
+    for label_value, name in enumerate(class_names):
+        subset = scores[y_true == label_value]
+        if subset.size:
+            ax.hist(subset, bins=bin_edges, alpha=0.6, label=name)
+    if threshold is not None:
+        ax.axvline(threshold, color="black", linestyle="--", label="threshold")
+    ax.set_xlabel("Anomaly score")
+    ax.set_ylabel("Count")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+
+    if output_path is not None:
+        fig.savefig(output_path)
+
+    return fig
+
+
 def plot_training_curves(
     history: Sequence[dict],
     output_path: Optional[Path] = None,

@@ -6,6 +6,7 @@ from src.evaluation.metrics import (
     compute_classification_metrics,
     compute_dice,
     compute_iou,
+    compute_metrics_vs_threshold,
     compute_pixel_level_metrics,
     youden_threshold,
 )
@@ -97,3 +98,18 @@ def test_compute_pixel_level_metrics_accepts_fixed_threshold():
     assert result["pixel_threshold"] == 0.8
     assert result["mean_iou"] == 1.0
     assert result["mean_dice"] == 1.0
+
+
+def test_compute_metrics_vs_threshold_perfectly_separable_scores():
+    y_true = [0, 0, 0, 1, 1, 1]
+    scores = [0.1, 0.2, 0.3, 0.7, 0.8, 0.9]
+    swept = compute_metrics_vs_threshold(y_true, scores, num_thresholds=5)
+    assert len(swept["thresholds"]) == 5
+    assert swept["thresholds"][0] == min(scores)
+    assert swept["thresholds"][-1] == max(scores)
+    # A threshold at the minimum score classifies everything as defective:
+    # recall is perfect but precision suffers.
+    assert swept["recall"][0] == 1.0
+    assert swept["precision"][0] < 1.0
+    # A threshold at the maximum score is only met by the top score itself.
+    assert swept["accuracy"][-1] < 1.0

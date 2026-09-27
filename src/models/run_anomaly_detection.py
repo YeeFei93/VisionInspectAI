@@ -24,6 +24,9 @@ from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import (
     compute_classification_metrics,
     compute_pixel_level_metrics,
+    plot_confusion_matrix,
+    plot_metric_vs_threshold,
+    plot_score_distribution,
     youden_threshold,
 )
 from src.models.anomaly_detector import PatchCoreAnomalyDetector, scoring_artifact_suffix
@@ -378,7 +381,8 @@ def main() -> None:
     checkpoint_dir = PROJECT_ROOT / output_cfg["checkpoint_dir"]
     metrics_dir = PROJECT_ROOT / output_cfg["metrics_dir"]
     heatmaps_dir = PROJECT_ROOT / output_cfg.get("heatmaps_dir", "outputs/heatmaps")
-    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir):
+    figures_dir = PROJECT_ROOT / output_cfg.get("figures_dir", "outputs/figures")
+    for directory in (checkpoint_dir, metrics_dir, heatmaps_dir, figures_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     run_name = build_run_name(
@@ -399,6 +403,28 @@ def main() -> None:
     if not args.metrics_only:
         detector.save(checkpoint_dir / f"{run_name}_memory_bank.pt")
     (metrics_dir / f"{run_name}_metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    plot_confusion_matrix(
+        labels_arr,
+        predictions,
+        output_path=figures_dir / f"{run_name}_confusion_matrix.png",
+        title=f"PatchCore ({category}) — confusion matrix",
+    )
+    plot_score_distribution(
+        scores_arr,
+        labels_arr,
+        threshold=threshold,
+        output_path=figures_dir / f"{run_name}_score_distribution.png",
+        title=f"PatchCore ({category}) — anomaly score distribution",
+    )
+    plot_metric_vs_threshold(
+        labels_arr,
+        scores_arr,
+        chosen_threshold=threshold,
+        output_path=figures_dir / f"{run_name}_metric_vs_threshold.png",
+        title=f"PatchCore ({category}) — metrics vs threshold",
+    )
+    print(f"Saved evaluation figures to {figures_dir}")
 
     if args.metrics_only:
         print(f"Saved metrics to {metrics_dir / f'{run_name}_metrics.json'}")
