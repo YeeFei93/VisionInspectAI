@@ -1,0 +1,41 @@
+category: tile
+
+data:
+  manifest_path: data/manifests/tile.csv
+  image_size: 224
+  val_split: 0.3
+  seed: 42
+
+model:
+  architecture: simple_cnn
+  pretrained: false
+  num_classes: 2
+
+defect_classifier:
+  use_focused_crops: false
+
+train:
+  batch_size: 16
+  epochs: 10
+  learning_rate: 0.0001
+  num_workers: 2
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0
+
+anomaly_detection:
+  backbone: resnet18
+  layers: [layer2, layer3]
+  coreset_ratio: 0.1
+  max_coreset_size: 2000
+  projection_dim: 128
+  batch_size: 16
+  calibration:
+    enabled: true
+    holdout_ratio: 0.2
+    percentile: 95.0
+
+output:
+  checkpoint_dir: models/checkpoints
+  metrics_dir: outputs/metrics
+  figures_dir: outputs/figures
+  heatmaps_dir: outputs/heatmaps
