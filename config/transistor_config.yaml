@@ -33,6 +33,13 @@ anomaly_detection:
   # it would also pick up the board's holes as "foreground". Disable masking
   # here; see README "Generalization to Other Categories".
   use_foreground_mask: false
+  keep_primary_region: true
+  primary_region_peak_fraction: 0.30
+  # Normal-only threshold calibration (see README threshold-calibration section).
+  calibration:
+    enabled: true
+    holdout_ratio: 0.2
+    percentile: 95.0
 
 output:
   checkpoint_dir: models/checkpoints

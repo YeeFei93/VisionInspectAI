@@ -184,6 +184,7 @@ def main() -> None:
             predictions,
             class_names=class_names,
             output_path=figures_dir / f"{run_name}_confusion_matrix.png",
+            title=f"{classifier_name} — confusion matrix",
         )
         if isinstance(classifier, SOMClassifier):
             plot_som_u_matrix(classifier, figures_dir / f"{run_name}_u_matrix.png")

@@ -1,6 +1,6 @@
-"""Tests for confidence-based prediction gating in the Streamlit app."""
+"""Tests for confidence-based inspection gating."""
 
-from app.streamlit_app import should_make_prediction
+from src.inference.inspection_pipeline import should_make_prediction
 
 
 def test_low_confidence_blocks_prediction():

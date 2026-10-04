@@ -16,6 +16,7 @@ not something with a directly computable accuracy number.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -32,6 +33,41 @@ class DefectRegion:
     area: int
     defect_type: str
     confidence: float
+
+
+def keep_primary_anomaly_region(
+    anomaly_map: torch.Tensor,
+    threshold: float,
+    suppressed_value: Optional[float] = None,
+    peak_fraction: float = 0.0,
+) -> torch.Tensor:
+    """Suppress disconnected above-threshold regions that do not contain
+    the map's strongest response. `peak_fraction` raises the region-growth
+    boundary toward the peak to prevent weak bridges from merging noise into
+    the primary region."""
+    if not 0 <= peak_fraction < 1:
+        raise ValueError("peak_fraction must be in [0, 1)")
+    anomaly_map_np = anomaly_map.detach().cpu().numpy()
+    growth_threshold = threshold + peak_fraction * (
+        float(anomaly_map_np.max()) - threshold
+    )
+    binary_mask = (anomaly_map_np >= growth_threshold).astype(np.uint8)
+    num_labels, labels = cv2.connectedComponents(binary_mask, connectivity=8)
+    if num_labels <= 1:
+        return anomaly_map.clone()
+
+    peak_y, peak_x = np.unravel_index(np.argmax(anomaly_map_np), anomaly_map_np.shape)
+    primary_label = labels[peak_y, peak_x]
+    if primary_label == 0:
+        return anomaly_map.clone()
+
+    suppress = np.logical_and(
+        anomaly_map_np >= threshold, labels != primary_label
+    )
+    filtered = anomaly_map.clone()
+    fill_value = anomaly_map.min() if suppressed_value is None else suppressed_value
+    filtered[torch.from_numpy(suppress).to(anomaly_map.device)] = fill_value
+    return filtered
 
 
 def find_defect_regions(binary_mask: np.ndarray, min_area: int = 30) -> list:

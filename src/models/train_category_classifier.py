@@ -9,9 +9,11 @@ Combines every manifest listed in --categories (default: all configured in
 app/streamlit_app.py's CATEGORY_CONFIGS), using every row regardless of
 good/defective status since object-type recognition doesn't care about
 defect status, and reuses ManifestImageDataset by treating the category
-index as the "label" column. Trains on the "train" split rows only and
-validates on the "test" split rows, so it never trains on the images
-reserved as the evaluation set for train_baseline.py / run_anomaly_detection.py.
+index as the "label" column. Uses a proper 3-way split: a stratified
+--val-split fraction of MVTec's own "train" rows is held out for
+early-stopping/best-epoch selection, and MVTec's "test" rows are reserved
+untouched as the final test set, evaluated exactly once after training so
+the reported metric isn't the same data used to pick the best epoch.
 
 Usage:
     python -m src.models.train_category_classifier
@@ -28,9 +30,10 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
 
 from src.data.dataset import ManifestImageDataset, load_manifest
-from src.evaluation.metrics import compute_per_class_report, plot_training_curves
+from src.evaluation.metrics import compute_per_class_report, plot_confusion_matrix, plot_training_curves
 from src.models.baseline_classifier import build_baseline_model
 from src.preprocessing.transform import get_train_transforms, get_val_transforms
 
@@ -38,6 +41,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CHECKPOINT_PATH = PROJECT_ROOT / "models" / "checkpoints" / "category_classifier_resnet18.pt"
 METRICS_PATH = PROJECT_ROOT / "outputs" / "metrics" / "category_classifier_metrics.json"
 FIGURE_PATH = PROJECT_ROOT / "outputs" / "figures" / "category_classifier_resnet18_training_curves.png"
+CONFUSION_MATRIX_FIGURE_PATH = (
+    PROJECT_ROOT / "outputs" / "figures" / "category_classifier_resnet18_confusion_matrix.png"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +51,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--categories",
         nargs="+",
-        default=["screw", "bottle", "hazelnut", "carpet", "leather", "grid", "tile", "wood"],
+        default=[
+            "screw",
+            "bottle",
+            "hazelnut",
+            "carpet",
+            "leather",
+            "grid",
+            "tile",
+            "wood",
+            "transistor",
+            "cable",
+            "capsule",
+            "metal_nut",
+            "pill",
+            "toothbrush",
+            "zipper",
+        ],
         help="Categories to include (must each have data/manifests/<category>.csv).",
     )
     parser.add_argument("--image-size", type=int, default=224)
@@ -53,6 +75,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=0.0001)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=0.30,
+        help="Fraction of MVTec's train/ rows held out (stratified) for early-stopping validation.",
+    )
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
@@ -122,9 +150,21 @@ def main() -> None:
     print(f"Categories (label order): {categories}", flush=True)
     print(f"Total images: {len(manifest)}", flush=True)
 
-    train_subset = manifest[manifest["split"] == "train"].reset_index(drop=True)
-    val_subset = manifest[manifest["split"] == "test"].reset_index(drop=True)
-    print(f"Train subset: {len(train_subset)} images | Val subset: {len(val_subset)} images", flush=True)
+    train_rows = manifest[manifest["split"] == "train"].reset_index(drop=True)
+    test_subset = manifest[manifest["split"] == "test"].reset_index(drop=True)
+    train_subset, val_subset = train_test_split(
+        train_rows,
+        test_size=args.val_split,
+        random_state=args.seed,
+        stratify=train_rows["label"],
+    )
+    train_subset = train_subset.reset_index(drop=True)
+    val_subset = val_subset.reset_index(drop=True)
+    print(
+        f"Train subset: {len(train_subset)} images | Val subset: {len(val_subset)} images "
+        f"| Test subset (held out, evaluated once): {len(test_subset)} images",
+        flush=True,
+    )
 
     train_dataset = ManifestImageDataset(
         train_subset, PROJECT_ROOT, transform=get_train_transforms(args.image_size)
@@ -132,9 +172,13 @@ def main() -> None:
     val_dataset = ManifestImageDataset(
         val_subset, PROJECT_ROOT, transform=get_val_transforms(args.image_size)
     )
+    test_dataset = ManifestImageDataset(
+        test_subset, PROJECT_ROOT, transform=get_val_transforms(args.image_size)
+    )
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     device = torch.device(
         "cuda" if torch.cuda.is_available()
@@ -188,12 +232,12 @@ def main() -> None:
                 break
 
     model.load_state_dict(best_state)
-    _val_loss, _val_accuracy, y_true, y_pred = evaluate(model, val_loader, criterion, device)
+    _test_loss, _test_accuracy, y_true, y_pred = evaluate(model, test_loader, criterion, device)
 
     accuracy = accuracy_score(y_true, y_pred)
     cm = confusion_matrix(y_true, y_pred).tolist()
     per_class_report = compute_per_class_report(y_true, y_pred, categories)
-    print(f"Validation accuracy (best epoch restored): {accuracy:.4f}", flush=True)
+    print(f"Test accuracy (best epoch restored, held-out MVTec test/ split): {accuracy:.4f}", flush=True)
     print(f"Confusion matrix (rows=true, cols=pred, order={categories}): {cm}", flush=True)
     print("Per-class report:", flush=True)
     print(json.dumps(per_class_report, indent=2), flush=True)
@@ -206,11 +250,12 @@ def main() -> None:
         json.dumps(
             {
                 "categories": categories,
-                "val_accuracy": accuracy,
-                "confusion_matrix": cm,
-                "classification_report": per_class_report,
+                "test_accuracy": accuracy,
+                "test_confusion_matrix": cm,
+                "test_classification_report": per_class_report,
                 "history": history,
                 "seed": args.seed,
+                "val_split": args.val_split,
                 "best_epoch": best_epoch,
                 "best_val_loss": best_val_loss,
                 "epochs_trained": len(history),
@@ -220,6 +265,13 @@ def main() -> None:
         )
     )
     plot_training_curves(history, output_path=FIGURE_PATH, title_prefix="Category classifier")
+    plot_confusion_matrix(
+        y_true,
+        y_pred,
+        class_names=categories,
+        output_path=CONFUSION_MATRIX_FIGURE_PATH,
+        title="Category classifier — confusion matrix",
+    )
 
     print(f"Saved checkpoint to {CHECKPOINT_PATH}", flush=True)
     print(f"Saved metrics to {METRICS_PATH}", flush=True)

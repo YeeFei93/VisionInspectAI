@@ -27,6 +27,11 @@ anomaly_detection:
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
+  # Normal-only threshold calibration (see README threshold-calibration section).
+  calibration:
+    enabled: true
+    holdout_ratio: 0.2
+    percentile: 95.0
   # Leather images are a close-up of a texture that fills the entire frame
   # (no discrete object vs. plain background, unlike screw/hazelnut) -- same
   # situation as bottle/carpet, so disable foreground masking; see README

@@ -2,6 +2,7 @@ import pytest
 import torch
 from torch import nn
 
+import src.models.anomaly_detector as anomaly_detector_module
 from src.models.anomaly_detector import (
     PatchCoreAnomalyDetector,
     _knn_patch_scores,
@@ -90,6 +91,43 @@ def test_detector_softmax_reweighting_changes_only_image_score():
 
     assert torch.allclose(plain.anomaly_map, reweighted.anomaly_map)
     assert reweighted.image_score != pytest.approx(plain.image_score)
+
+
+def test_detector_keeps_full_resolution_background_at_fill_score():
+    image = torch.zeros((1, 3, 4, 8))
+    foreground_mask = torch.zeros((1, 4, 8), dtype=torch.bool)
+    foreground_mask[:, :, :4] = True
+
+    result = make_detector().predict(image, foreground_masks=foreground_mask)[0]
+
+    assert result.image_score == pytest.approx(0.2)
+    assert torch.all(result.anomaly_map[:, 4:] == result.anomaly_map[:, 4:].min())
+    assert result.anomaly_map[:, :4].max() > result.anomaly_map[:, 4:].max()
+
+
+def test_fit_caps_coreset_candidates_deterministically(monkeypatch):
+    captured_candidates = []
+
+    def capture_coreset(features, n_select, **_kwargs):
+        captured_candidates.append(features.clone())
+        return features[:n_select]
+
+    monkeypatch.setattr(anomaly_detector_module, "_greedy_coreset", capture_coreset)
+    loader = [(torch.arange(20).reshape(10, 2).float(), None) for _ in range(3)]
+
+    for _ in range(2):
+        detector = object.__new__(PatchCoreAnomalyDetector)
+        detector.seed = 42
+        detector.max_coreset_candidates = 9
+        detector.max_coreset_size = 3
+        detector.coreset_ratio = 1.0
+        detector.projection_dim = 2
+        detector.projection_method = "random"
+        detector._extract_patches = lambda images: images
+        detector.fit(loader)
+
+    assert len(captured_candidates[0]) == 9
+    assert torch.equal(captured_candidates[0], captured_candidates[1])
 
 
 @pytest.mark.parametrize(

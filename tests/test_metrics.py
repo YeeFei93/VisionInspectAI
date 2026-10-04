@@ -6,7 +6,9 @@ from src.evaluation.metrics import (
     compute_classification_metrics,
     compute_dice,
     compute_iou,
+    compute_metrics_vs_threshold,
     compute_pixel_level_metrics,
+    percentile_threshold,
     youden_threshold,
 )
 
@@ -36,6 +38,21 @@ def test_youden_threshold_separates_perfectly_separable_scores():
     threshold = youden_threshold(y_true, scores)
     preds = [1 if s >= threshold else 0 for s in scores]
     assert preds == y_true
+
+
+def test_percentile_threshold_matches_numpy_percentile():
+    scores = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert percentile_threshold(scores, 50.0) == np.percentile(scores, 50.0)
+
+
+def test_percentile_threshold_never_looks_at_labels():
+    # Normal-only calibration: only takes scores, no labelled defects needed.
+    normal_scores = np.array([0.1, 0.2, 0.2, 0.3, 0.9])
+    threshold = percentile_threshold(normal_scores, 80.0)
+    assert threshold == np.percentile(normal_scores, 80.0)
+    # False-alarm rate at this threshold on the same normal scores is <= 20%.
+    false_alarm_rate = (normal_scores >= threshold).mean()
+    assert false_alarm_rate <= 0.2 + 1e-9
 
 
 def test_compute_iou_identical_masks_is_one():
@@ -80,3 +97,35 @@ def test_compute_pixel_level_metrics_perfect_localization():
     assert result["pixel_auroc"] == 1.0
     assert result["mean_iou"] == 1.0
     assert result["mean_dice"] == 1.0
+
+
+def test_compute_pixel_level_metrics_accepts_fixed_threshold():
+    anomaly_maps = [
+        np.array([[0.1, 0.4], [0.6, 0.9]]),
+    ]
+    gt_masks = [
+        np.array([[0, 0], [0, 1]], dtype=np.uint8),
+    ]
+
+    result = compute_pixel_level_metrics(
+        anomaly_maps, gt_masks, pixel_threshold=0.8
+    )
+
+    assert result["pixel_threshold"] == 0.8
+    assert result["mean_iou"] == 1.0
+    assert result["mean_dice"] == 1.0
+
+
+def test_compute_metrics_vs_threshold_perfectly_separable_scores():
+    y_true = [0, 0, 0, 1, 1, 1]
+    scores = [0.1, 0.2, 0.3, 0.7, 0.8, 0.9]
+    swept = compute_metrics_vs_threshold(y_true, scores, num_thresholds=5)
+    assert len(swept["thresholds"]) == 5
+    assert swept["thresholds"][0] == min(scores)
+    assert swept["thresholds"][-1] == max(scores)
+    # A threshold at the minimum score classifies everything as defective:
+    # recall is perfect but precision suffers.
+    assert swept["recall"][0] == 1.0
+    assert swept["precision"][0] < 1.0
+    # A threshold at the maximum score is only met by the top score itself.
+    assert swept["accuracy"][-1] < 1.0
