@@ -14,6 +14,7 @@ This project is the practice module project for the NUS-ISS Graduate Certificate
 - `src/models/train_category_classifier.py` trains a ResNet18 to auto-detect which category an image belongs to; `app/streamlit_app.py` uses it to route to the right per-category PatchCore model.
 - `src/models/train_defect_classifier.py` trains a per-category classifier over `defect_type` labels (defective images only, e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`) so the Streamlit demo can show what kind of defect was found, not just Normal/Defective. Optional per category — the app gracefully skips this if a category has no trained checkpoint.
 - `src/models/run_ensemble.py` fuses the classifier + PatchCore scores.
+- `src/models/run_autoencoder.py` trains/evaluates a convolutional autoencoder (`src/models/autoencoder.py`) as a reconstruction-based alternative to PatchCore, reusing PatchCore's calibration split, thresholds, and metric code so results are directly comparable. Configured via an optional `autoencoder:` section in the category YAML (currently only `transistor_config.yaml`); not used by the Streamlit app.
 - Everything is driven by per-category YAML in `config/` (e.g. `screw_config.yaml`) — copy one to add a new category, don't hardcode category-specific values in code.
 
 ## Build, Test, Run

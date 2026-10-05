@@ -41,6 +41,22 @@ anomaly_detection:
     holdout_ratio: 0.2
     percentile: 95.0
 
+# Reconstruction-based unsupervised alternative to PatchCore (see README
+# "Unsupervised Comparison: Autoencoder vs PatchCore"). Reuses the
+# anomaly_detection calibration split, use_foreground_mask, and
+# keep_primary_region settings above so both detectors are scored identically.
+autoencoder:
+  latent_dim: 128
+  base_channels: 32
+  loss: l2                 # l2 (MSE) or ssim; also the per-pixel error metric
+  epochs: 200
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  batch_size: 16
+  score_reduction: mean    # mean, max, or topk (all three AUROCs are reported)
+  topk_fraction: 0.01
+  error_blur_sigma: 4.0
+
 output:
   checkpoint_dir: models/checkpoints
   metrics_dir: outputs/metrics

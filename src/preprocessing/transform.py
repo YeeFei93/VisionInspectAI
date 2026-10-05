@@ -28,6 +28,18 @@ def get_val_transforms(image_size: int = 224) -> transforms.Compose:
     )
 
 
+def get_autoencoder_transforms(image_size: int = 224) -> transforms.Compose:
+    """Raw [0, 1] pixels with no ImageNet normalization: the autoencoder
+    reconstructs the image itself (sigmoid output), so the input and the
+    reconstruction target must live in the same pixel space."""
+    return transforms.Compose(
+        [
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+        ]
+    )
+
+
 def get_patchcore_train_transforms(
     image_size: int = 224, translate_ratio: float = 0.0
 ) -> transforms.Compose:

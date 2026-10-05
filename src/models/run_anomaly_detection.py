@@ -24,6 +24,7 @@ Usage:
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 from src.data.dataset import ManifestImageDataset, load_manifest
 from src.evaluation.metrics import (
     compute_classification_metrics,
+    compute_per_defect_type_detection,
     compute_pixel_level_metrics,
     percentile_threshold,
     plot_confusion_matrix,
@@ -386,7 +388,9 @@ def main() -> None:
     )
 
     print(f"Fitting PatchCore memory bank on {len(train_dataset)} train/good images...")
+    fit_start = time.perf_counter()
     detector.fit(train_loader)
+    fit_seconds = time.perf_counter() - fit_start
     print(f"Memory bank size: {detector.memory_bank.shape[0]} patches")
 
     use_foreground_mask = anomaly_cfg.get("use_foreground_mask", True)
@@ -411,7 +415,9 @@ def main() -> None:
         print("Freezing model + thresholds; evaluating once on the full test set...")
 
     print(f"Scoring {len(test_rows)} test images ({mask_note})...")
+    inference_start = time.perf_counter()
     scores, anomaly_maps = score_rows(test_rows, detector, transform, image_size, use_foreground_mask)
+    inference_ms_per_image = 1000 * (time.perf_counter() - inference_start) / len(test_rows)
     labels = test_rows["label"].astype(int).tolist()
 
     scores_arr = np.array(scores)
@@ -456,6 +462,12 @@ def main() -> None:
         "translate_ratio": translate_ratio,
         "copies": augmentation_copies,
     }
+    metrics["per_defect_type"] = compute_per_defect_type_detection(
+        test_rows["defect_type"].tolist(), labels_arr, scores_arr, predictions
+    )
+    metrics["fit_seconds"] = fit_seconds
+    metrics["inference_ms_per_image"] = inference_ms_per_image
+    metrics["device"] = device
 
     print(f"Image-level ROC-AUC: {auroc:.4f}")
     if calibration_enabled:
