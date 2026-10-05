@@ -809,6 +809,37 @@ Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.
 
 **Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are. Screw (0.444) and grid (0.222) are cases where the defect types are inherently subtle or overlapping even with more training data; leather (0.964) and tile (0.923) succeed because their defect types are visually distinct phenomena. The task is fundamentally harder than object-category detection (100% accuracy across all eight categories) or binary good/defective classification (both are coarser-grained decisions with better natural class separation).
 
+### Matched augmentation and architecture benchmark
+
+**Script:** [src/models/benchmark_defect_classifiers.py](src/models/benchmark_defect_classifiers.py). The benchmark uses one seeded stratified 70/30 split per category, reused for all four runs: ResNet18 without augmentation (the before-augmentation baseline), then ResNet18, ConvNeXt-Tiny, and EfficientNet-B0 with the same training augmentation. Augmentation is limited to random horizontal/vertical flips and exact 90-degree rotations (0°, 90°, 180°, 270°); it is applied only to training images, while each image's defect-type ground-truth label is retained. Validation images are not augmented.
+
+All models use the category config's pretrained setting, learning rate, and maximum 10-epoch budget with early stopping. Macro-F1 is reported to account for per-class performance; final train loss is the last completed epoch's loss, while validation predictions use the restored best-validation-loss checkpoint. Values below are `accuracy / macro-F1 / final train loss`.
+
+| Category | ResNet18, no augmentation | ResNet18, flips + 90° | ConvNeXt-Tiny, flips + 90° | EfficientNet-B0, flips + 90° |
+|---|---:|---:|---:|---:|
+| Screw | 0.194 / 0.160 / 0.1915 | 0.500 / 0.456 / 0.7254 | 0.694 / 0.652 / 0.8174 | 0.222 / 0.192 / 1.3478 |
+| Bottle | 0.895 / 0.892 / 0.0053 | 0.895 / 0.892 / 0.0597 | 0.895 / 0.892 / 0.1141 | 0.737 / 0.739 / 0.4187 |
+| Hazelnut | 0.857 / 0.865 / 0.0520 | 0.905 / 0.896 / 0.1022 | 0.905 / 0.902 / 0.0363 | 0.619 / 0.605 / 0.6953 |
+| Carpet | 0.778 / 0.764 / 0.0087 | 0.778 / 0.781 / 0.1183 | 0.889 / 0.891 / 0.0636 | 0.704 / 0.670 / 1.1800 |
+| Leather | 0.929 / 0.926 / 0.0072 | 0.964 / 0.964 / 0.0719 | 1.000 / 1.000 / 0.0237 | 0.750 / 0.740 / 0.8877 |
+| Wood | 0.667 / 0.646 / 0.0106 | 0.722 / 0.652 / 0.1728 | 0.889 / 0.867 / 0.0636 | 0.556 / 0.393 / 1.1422 |
+| Grid | 0.222 / 0.163 / 0.3957 | 0.278 / 0.185 / 0.8089 | 0.667 / 0.671 / 0.5964 | 0.389 / 0.322 / 1.4159 |
+| Tile | 0.923 / 0.920 / 0.0131 | 1.000 / 1.000 / 0.0467 | 1.000 / 1.000 / 0.0089 | 0.885 / 0.874 / 0.7190 |
+| Transistor | 0.667 / 0.667 / 0.0048 | 0.500 / 0.450 / 0.1815 | 0.750 / 0.742 / 0.2091 | 0.333 / 0.333 / 0.9386 |
+
+Architecture means give each category equal weight; standard deviations are across the nine categories.
+
+| Architecture / training | Mean validation accuracy ± SD | Mean macro-F1 ± SD | Mean final train loss |
+|---|---:|---:|---:|
+| ResNet18, no augmentation | 0.681 ± 0.286 | 0.667 ± 0.304 | 0.0765 |
+| ResNet18, flips + 90° | 0.727 ± 0.250 | 0.697 ± 0.281 | 0.2542 |
+| ConvNeXt-Tiny, flips + 90° | **0.854 ± 0.123** | **0.846 ± 0.129** | 0.2148 |
+| EfficientNet-B0, flips + 90° | 0.577 ± 0.221 | 0.541 ± 0.236 | 0.9717 |
+
+**Finding and recommendation:** flips/quarter-turns raised ResNet18's category-mean accuracy by 4.6 percentage points and macro-F1 by 3.0 points; the improvement was not universal (transistor fell from 0.667 to 0.500). ConvNeXt-Tiny was the strongest augmented architecture by both category-mean metrics and was best or tied-best in every category in this split, so it is the leading candidate for defect-type classification. EfficientNet-B0 did not improve on ResNet18 overall here. Treat these as exploratory results, not an unbiased estimate: all training and validation examples originate in MVTec's labeled `test/` data, and each category has only one small validation split. A held-out source or repeated nested stratified cross-validation is needed before locking in deployment performance.
+
+As a supplementary comparison, an equal-weight soft vote of the three augmented models reached mean validation accuracy **0.803 ± 0.168** and macro-F1 **0.786 ± 0.178** across categories. This is also measured on the same exploratory validation splits; it does not establish that an ensemble will generalize better than ConvNeXt-Tiny.
+
 ### Defect-focused crop ablation
 
 [src/preprocessing/defect_crop.py](src/preprocessing/defect_crop.py) converts a binary localization mask into a padded square crop. Training can use either MVTec ground-truth masks (`--crop-source ground-truth`) or the default PatchCore detector's predicted pixel mask (`--crop-source patchcore`). The latter matches deployment: [app/streamlit_app.py](app/streamlit_app.py) thresholds the uploaded image's PatchCore anomaly map, intersects it with the object foreground when enabled, applies the same crop metadata saved with the classifier, then predicts defect type from that crop.
