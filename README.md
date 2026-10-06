@@ -76,6 +76,7 @@ This project combines multiple pattern recognition / machine learning aspects, a
 - **Supervised / unsupervised learning scenarios**
   - Supervised: [src/models/baseline_classifier.py](src/models/baseline_classifier.py) — a `resnet18`, `efficientnet_b0`, `convnext_tiny`, or `vit_b_16` transfer-learning classifier, or `simple_cnn` trained from scratch, fine-tuned on labeled good/defective images (trained via [src/models/train_baseline.py](src/models/train_baseline.py)).
   - Unsupervised: [src/models/anomaly_detector.py](src/models/anomaly_detector.py) — a PatchCore-style anomaly detector trained only on `train/good` images (no defect labels needed), evaluated on the full labeled test set via [src/models/run_anomaly_detection.py](src/models/run_anomaly_detection.py).
+  - Unsupervised (reconstruction-based alternative): [src/models/autoencoder.py](src/models/autoencoder.py) — a convolutional autoencoder trained from scratch on the same `train/good` images to reconstruct normal parts; the per-pixel reconstruction error is the anomaly heatmap. Evaluated with the identical protocol via [src/models/run_autoencoder.py](src/models/run_autoencoder.py) and compared against PatchCore in [Unsupervised Comparison: Autoencoder vs PatchCore](#unsupervised-comparison-autoencoder-vs-patchcore-transistor).
 
 - **Machine learning / deep learning techniques**
   - ImageNet-pretrained deep backbones: ResNet18, EfficientNet-B0, and ConvNeXt-Tiny CNNs plus ViT-B/16, used for supervised fine-tuning comparisons; ResNet18/WideResNet50-2 are also used as frozen PatchCore feature extractors.
@@ -95,7 +96,7 @@ This project combines multiple pattern recognition / machine learning aspects, a
 
 - `src/data/` — manifest generation ([create_manifest.py](src/data/create_manifest.py)) and PyTorch `Dataset` ([dataset.py](src/data/dataset.py))
 - `src/preprocessing/` — image transforms and foreground/object segmentation
-- `src/models/` — baseline classifiers, PatchCore anomaly detector, ensemble fusion, and training/evaluation scripts
+- `src/models/` — baseline classifiers, PatchCore anomaly detector, convolutional autoencoder (alternative unsupervised detector), ensemble fusion, and training/evaluation scripts
 - `src/inference/` — framework-independent inspection orchestration that returns a structured result for the Streamlit app or other clients
 - `src/evaluation/` — classification/pixel-level metrics and seeded benchmark aggregation
 - `src/visualization/` — anomaly heatmap rendering
@@ -119,12 +120,26 @@ python -m src.models.train_baseline --config config/screw_config.yaml --cross-va
 # 3. Train and evaluate the unsupervised PatchCore anomaly detector
 python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 
+# Optional: reconstruction-based alternative (convolutional autoencoder), same evaluation protocol.
+# Needs an `autoencoder:` section in the category config (see config/transistor_config.yaml).
+python -m src.models.run_autoencoder --config config/transistor_config.yaml              # L2/MSE loss
+python -m src.models.run_autoencoder --config config/transistor_config.yaml --loss ssim  # SSIM loss
+# Optional: fuse PatchCore + autoencoder (needs both autoencoder checkpoints above), alpha = PatchCore weight
+python -m src.models.run_patchcore_autoencoder_ensemble --config config/transistor_config.yaml --alpha 0.5
+
 # 4. (optional) Train the per-category defect-type classifier (what kind of defect is it?)
 python -m src.models.train_defect_classifier --config config/screw_config.yaml
 
 # Screw option: train on deployment-matched PatchCore defect crops
 python -m src.models.train_defect_classifier --config config/screw_config.yaml \
   --defect-focused-crops --crop-source patchcore
+
+# Wood/transistor option: tiny defect classes (e.g. wood's `color` has only 8 images) —
+# nested holdout + stratified K-fold CV to pick settings, then one final fit evaluated once on the holdout
+python -m src.models.train_defect_classifier --config config/wood_config.yaml \
+  --freeze-backbone --holdout-per-class 2 --cross-validation --folds 4
+python -m src.models.train_defect_classifier --config config/wood_config.yaml \
+  --freeze-backbone --holdout-per-class 2
 **Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for 10 epochs. Training seeds NumPy/PyTorch from `data.seed` so full-image and crop experiments are reproducible.
 
 Add `--defect-focused-crops --crop-source patchcore` to crop each image around the region above the saved PatchCore pixel threshold before resize/augmentation. This uses the same predicted localization available in Streamlit, with 25% context padding and a minimum crop side of 25% of the shorter image dimension by default. `--crop-source ground-truth` is available as an oracle ablation, but its validation score is not a deployment estimate because uploaded images have no ground-truth masks.
@@ -313,11 +328,29 @@ For a less split-sensitive estimate, add `--cross-validation --folds 5`. This ru
 
 **Output** (named `patchcore_<backbone>_<category>`):
 - `models/checkpoints/patchcore_<backbone>_<category>_memory_bank.pt` — the memory bank tensor (the "trained model"; fit only on the calibration split's fitting subset when calibration is enabled).
-- `outputs/metrics/patchcore_<backbone>_<category>_metrics.json` — AUROC, threshold, threshold_method, calibration settings, score min/max, pixel AUROC, pixel threshold, mean IoU, mean Dice, accuracy/precision/recall/F1, projection method, and seed.
+- `outputs/metrics/patchcore_<backbone>_<category>_metrics.json` — AUROC, threshold, threshold_method, calibration settings, score min/max, pixel AUROC, pixel threshold, mean IoU, mean Dice, accuracy/precision/recall/F1, projection method, seed, per-defect-type detection (`per_defect_type`: flagged rate + good-vs-type AUROC), and timing (`fit_seconds`, `inference_ms_per_image`).
 - `outputs/metrics/patchcore_<backbone>_<category>_calibration_split.json` — the fitting/calibration image paths, holdout ratio, percentile, and both frozen thresholds (only written when calibration is enabled).
 - `outputs/heatmaps/patchcore_<backbone>_<category>_<defect_type>_example.png` — one example figure per defect type: original image | predicted heatmap | ground-truth mask | overlay, for a quick visual sanity check.
 
 Experimental overrides append identifiers instead of overwriting the default artifacts: PCA uses `_pcaproj`, an explicit/configured seed uses `_seed<seed>`, k-NN uses `_knn<k>`, and reweighting uses `_rw<support>` (for example, `patchcore_resnet18_screw_knn3_rw9_metrics.json`). `--metrics-only` still evaluates and saves the JSON metrics but skips the memory-bank checkpoint and example heatmaps, which is useful for multi-run benchmarks.
+
+### Step 3b (optional) — Train and evaluate the convolutional autoencoder (alternative unsupervised detector)
+
+**Script:** [src/models/run_autoencoder.py](src/models/run_autoencoder.py), using [src/models/autoencoder.py](src/models/autoencoder.py) (`ConvAutoencoder` + error-map/scoring helpers) and `get_autoencoder_transforms` in [src/preprocessing/transform.py](src/preprocessing/transform.py).
+
+**What it does:** a reconstruction-based counterpart to PatchCore, evaluated with *exactly* the same protocol so the two are directly comparable: it reuses the category's `anomaly_detection.calibration` split (same seed → same fitting/held-out normal images), the 95th-percentile image/pixel thresholds, `use_foreground_mask`, `keep_primary_region`, and the same metric code.
+
+**Algorithm:**
+1. **Train only on `train/good`:** the autoencoder learns to reconstruct normal products. Inputs are raw `[0, 1]` RGB pixels (no ImageNet normalization, since the network must output the image itself) at 224×224, without rotation/flip augmentation (transistor's `misplaced` defect *is* a rotated/missing part). Architecture follows the MVTec-AD reference autoencoder: five stride-2 conv blocks (224 → 7) and a 7×7 conv squeeze the image into a **1×1×`latent_dim` bottleneck** (default 128), mirrored by a transposed-conv decoder with a sigmoid output (6.7M parameters). The narrow bottleneck is deliberate — a wide one can learn an identity map and reconstruct the defect too. Trained from scratch with Adam for `autoencoder.epochs` (200) on either MSE (`loss: l2`) or 1 − SSIM (`loss: ssim`, Gaussian-window SSIM implemented in pure PyTorch).
+2. **Anomaly map:** per-pixel reconstruction error between input `x` and reconstruction `x̂` — squared error averaged over RGB (`l2`) or 1 − SSIM (`ssim`) — Gaussian-smoothed with σ = `error_blur_sigma` (4) to suppress single-pixel noise. A defective region is reconstructed as "what a normal part should look like", so it differs from the input.
+3. **Image score:** `score_reduction` of the map — `mean` (default), `max`, or `topk` (mean of the worst 1% of pixels). AUROC for all three reductions is always reported (`auroc_by_score_reduction`); the configured one drives the thresholded predictions.
+4. **Thresholding/evaluation:** identical to Step 3 (normal-only calibration → frozen thresholds → one pass over the full test set).
+
+**Output** (named `autoencoder_conv_<loss>_<category>`, plus `_ld<latent_dim>` when `--latent-dim` overrides the config):
+- `models/checkpoints/autoencoder_conv_<loss>_<category>.pt` — weights + architecture settings + both frozen thresholds.
+- `outputs/metrics/autoencoder_conv_<loss>_<category>_metrics.json` — the same keys as PatchCore's metrics, plus `auroc_by_score_reduction`, parameter count, final train/held-out-normal losses, training time; `..._history.json` holds the per-epoch losses.
+- `outputs/figures/autoencoder_conv_<loss>_<category>_{loss_curve,confusion_matrix,score_distribution,metric_vs_threshold}.png`.
+- `outputs/heatmaps/autoencoder_conv_<loss>_<category>_<defect_type>_example.png` (same layout as PatchCore's) and `..._<defect_type>_reconstruction.png` — **input | reconstruction | reconstruction error | ground-truth mask**, the most direct visual explanation of how the method works.
 
 ### Step 4 — Train the category classifier (auto-detect object type)
 
@@ -360,6 +393,8 @@ Training on all nine configured categories (screw, bottle, hazelnut, carpet, lea
 **What it does:** unlike the Step 2 good/defective classifier, this only looks at a single category's *defective* test/ rows and predicts which `defect_type` it is (e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`), on a stratified train/val split over just those defect types.
 
 **Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for up to 10 epochs. Training seeds NumPy/PyTorch from `data.seed`, evaluates on the validation split every epoch, restores the lowest-val-loss epoch's weights before saving, and early-stops after `train.early_stopping_patience` (default 3) epochs without improvement. `--freeze-backbone` freezes everything except the classification head (~2k trainable parameters instead of ~11M) as an overfitting control, `--learning-rate` overrides the config's LR (a frozen head needs a much higher LR than fine-tuning), and `--epochs` overrides the config's epoch budget (useful to confirm val loss has actually plateaued rather than just hitting the default epoch count).
+
+For categories with very few images in their smallest defect class (transistor: 10/class; wood: `color` has only 8), a plain train/val split is too noisy to trust (see the Notes & Lessons Learned entry below). Use `--holdout-per-class N` to reserve `N` images/defect type as a final untouched test set, and `--cross-validation --folds K` to run stratified K-fold CV on the remaining development set for model selection (evaluation-only — no checkpoint saved, `--folds` can't exceed the smallest dev-class count). Once settings are chosen, rerun with `--holdout-per-class N` alone (no `--cross-validation`) to fit the deployable checkpoint on all dev images and evaluate it once on the holdout.
 
 **Output** (named `defect_classifier_<architecture>_<category>`):
 - `models/checkpoints/defect_classifier_<architecture>_<category>.pt` — model state dict (best-validation-loss epoch).
@@ -406,6 +441,8 @@ This is optional per category — the Streamlit demo checks whether a checkpoint
 - [tests/test_defect_crop.py](tests/test_defect_crop.py): focused crop boxes are square, padded/clamped correctly, resize mask coordinates safely, fall back for empty masks, and are applied by the manifest dataset before transforms.
 - [tests/test_anomaly_scoring.py](tests/test_anomaly_scoring.py): k-NN means/indices, PatchCore softmax weights, invalid settings, artifact suffixes, and the detector-level contract that reweighting changes only image scores.
 - [tests/test_patchcore_scoring_summary.py](tests/test_patchcore_scoring_summary.py): scoring experiments are scoped to the correct baseline, ranked, and compared with metric deltas.
+- [tests/test_anomaly_fusion.py](tests/test_anomaly_fusion.py): calibration normalizers (z-score / min-max, no clipping, constant/empty rejection) and the weighted-average fusion rule with α endpoints selecting a single detector.
+- [tests/test_autoencoder.py](tests/test_autoencoder.py): an untrained `ConvAutoencoder` preserves input shape with `[0, 1]` output, SSIM of identical images is 1, L2/SSIM error maps are zero for perfect reconstructions and peak at a corrupted region, mean/max/top-k score reductions, the raw-pixel autoencoder transform, and per-defect-type detection rates/AUROC.
 
 **Output:** pytest pass/fail report in the terminal; no files are written.
 
@@ -672,6 +709,103 @@ Same backbone (ResNet18), memory bank size (2000 patches), projection dimension 
 
 **Finding — PCA is category- and seed-dependent, not a general PatchCore upgrade.** Screw is the only category with a material average image-level gain (+1.20 points), but its variability is large (0.9212 ± 0.0144): seed 42 produced the earlier headline 0.9356, while seed 43 fell to 0.9067 — below the 0.9092 random baseline. Averaging the seeds also reverses the earlier localization claim for screw: mean IoU/Dice are 0.0451/0.0851 versus random's 0.0471/0.0884. Bottle and leather are already at the image-AUROC ceiling, and PCA changes essentially nothing. Hazelnut/carpet gain only 0.15/0.09 image-AUROC points while pixel AUROC decreases by 0.04 points; their mean IoU/Dice nevertheless improve (hazelnut 0.209/0.320 → 0.216/0.329, carpet 0.251/0.372 → 0.260/0.381), illustrating again that ranking and thresholded overlap are separate axes. **Recommendation:** keep random projection as the global default; treat PCA as a per-category option worth considering for screw after multiple-seed validation, not as a universal replacement. A fairer future comparison should also run the random projection over the same seeds instead of comparing a PCA distribution only against one random seed.
 
+## Unsupervised Comparison: Autoencoder vs PatchCore (Transistor)
+
+Both detectors answer the same unsupervised question — *"does this image look like the normal training images?"* — but learn "normal" in very different ways. Transistor was used as the case study because its four defect types range from a gross structural change (`misplaced`: transistor missing or rotated, ~42% of the image in the ground-truth mask) to tiny local defects (`bent_lead`/`cut_lead`, ~1.6%; `damaged_case`, ~2.8%).
+
+| | PatchCore ([Step 3](#step-3--train-and-evaluate-the-unsupervised-patchcore-anomaly-detector)) | Convolutional autoencoder ([Step 3b](#step-3b-optional--train-and-evaluate-the-convolutional-autoencoder-alternative-unsupervised-detector)) |
+|---|---|---|
+| What models "normal" | Memory bank of 2,000 patch features from a frozen ImageNet-pretrained ResNet18 | Network weights (6.7M) trained from scratch to reconstruct normal images through a 128-d bottleneck |
+| Training | No gradient training — feature extraction + greedy coreset | 200 epochs of Adam on reconstruction loss (MSE or SSIM) |
+| Image score | Max over patches of nearest-neighbor distance in feature space | Mean (or max/top-k) of the pixel reconstruction-error map |
+| Heatmap | Upsampled 28×28 patch-distance grid | Full-resolution pixel error map (blurred) |
+| Strength | Pretrained features are sensitive to subtle local texture/shape changes | Intuitive and self-explanatory (you can *see* what it thinks the part should look like); catches gross structural changes |
+| Weakness | Needs a pretrained backbone; coarse 28×28 localization grid | Reconstructions are blurry, so thin high-frequency normal structures (leads, edges) always produce some error, which masks small defects |
+
+**Setup (controlled comparison):** identical 170/43 fitting/held-out-normal calibration split (seed 42), 224×224 inputs, 95th-percentile normal-only thresholds, the same full 100-image test set scored once, the same metric code, and the same `keep_primary_region` postprocessing from `transistor_config.yaml`. Timing measured in the same environment (Apple MPS, includes image decode/resize); single seeded run each.
+
+| Detector | Image ROC-AUC | Accuracy / Precision / Recall / F1 @ calibrated threshold | False-alarm rate (good) | Pixel ROC-AUC | IoU / Dice (raw map) | IoU / Dice (after `keep_primary_region`) | Fit / train time | Inference (ms/img) | Trainable params |
+|---|---|---|---|---|---|---|---|---|---|
+| PatchCore (ResNet18, layer2+3) | **0.990** | **0.89** / 0.78 / **1.00** / **0.88** | 18.3% (11/60) | **0.967** | 0.252 / 0.352 | **0.315 / 0.455** | **24 s** | 28.8 | 0 (frozen 2.8M ResNet18 stem→layer3 + 2,000×384 memory bank, 3.1 MB) |
+| Autoencoder, L2/MSE loss | 0.831 | 0.75 / 0.78 / 0.53 / 0.63 | 10.0% (6/60) | 0.911 | 0.254 / 0.356 | 0.066 / 0.113 | 186 s | 23.0 | 6.7M |
+| Autoencoder, SSIM loss | 0.832 | 0.75 / **0.83** / 0.48 / 0.60 | **6.7% (4/60)** | 0.929 | **0.272 / 0.379** | 0.147 / 0.220 | 280 s | 23.3 | 6.7M |
+
+**Per defect type** — fraction flagged as defective at the calibrated threshold / image ROC-AUC of good-vs-this-type:
+
+| Defect type (mask area) | PatchCore | Autoencoder L2 | Autoencoder SSIM |
+|---|---|---|---|
+| `bent_lead` (1.6%) | **1.00 / 1.000** | 0.50 / 0.895 | 0.50 / 0.877 |
+| `cut_lead` (1.6%) | **1.00 / 0.985** | 0.30 / 0.780 | 0.20 / 0.745 |
+| `damaged_case` (2.8%) | **1.00 / 0.998** | 0.30 / 0.650 | 0.20 / 0.705 |
+| `misplaced` (41.9%) | 1.00 / 0.975 | **1.00 / 1.000** | **1.00 / 1.000** |
+
+**Ablations (autoencoder):**
+
+| Variant | Image ROC-AUC (mean / max / top-1%) | Pixel ROC-AUC | Params |
+|---|---|---|---|
+| L2, latent 32 | 0.820 / 0.751 / 0.797 | 0.911 | 4.3M |
+| L2, latent 128 (default) | **0.831** / **0.773** / 0.819 | 0.911 | 6.7M |
+| L2, latent 512 | 0.829 / 0.772 / **0.823** | 0.910 | 16.3M |
+| SSIM, latent 128 | **0.832** / 0.680 / 0.818 | **0.929** | 6.7M |
+
+**Finding — PatchCore is clearly the stronger detector; the autoencoder only matches it on gross structural defects.** PatchCore leads by ~16 image-AUROC points (0.990 vs 0.831/0.832) and catches every defective image (recall 1.00 vs 0.53/0.48). The per-type table shows where the gap comes from: on `misplaced` the autoencoder is actually *perfect* (AUROC 1.000 vs PatchCore's 0.975) — a missing transistor gets "hallucinated" back as a blurry normal transistor, so the error is huge — but on the small local defects it falls to 0.65–0.90 AUROC and flags only 20–50% of them, while PatchCore stays ≥ 0.975. The reconstruction figures explain why: the autoencoder's reconstructions are blurry, so the thin, high-contrast leads and case edges carry reconstruction error **even on good images**; a bent/cut lead or a chipped case corner is just one more hotspot among these normal ones (e.g. `outputs/heatmaps/autoencoder_conv_ssim_transistor_cut_lead_reconstruction.png` lights up all three leads and the top edge of the case, not only the cut tip). PatchCore compares *pretrained semantic features* rather than raw pixels, so normal fine structure matches the memory bank and only genuinely unusual patches stand out. The latent-size sweep (0.820 / 0.831 / 0.829 for 32 / 128 / 512) shows the gap is not a bottleneck-tuning issue. The autoencoder's lower false-alarm rate (6.7–10% vs 18.3%) is not an advantage in itself — its scores are simply less separated, so the same 95th-percentile threshold trades false alarms for many missed defects (F1 0.60–0.63 vs 0.88).
+
+**Finding — SSIM loss helps localization, not detection.** Switching from MSE to SSIM left image AUROC unchanged (0.831 → 0.832) but raised pixel AUROC from 0.911 to 0.929 and raw IoU/Dice from 0.254/0.356 to 0.272/0.379. SSIM's 1 − SSIM error map measures local structure (edges, contrast) rather than raw intensity differences, which suits a chipped/bent part better than per-pixel color error. It is still below PatchCore's 0.967 pixel AUROC.
+
+**Recommendation:** keep PatchCore as the project's unsupervised detector (and the one used by the Streamlit demo). The autoencoder remains useful as an explainable, from-scratch baseline that demonstrates *why* feature-space methods replaced pixel-reconstruction methods on MVTec-AD, and its reconstruction figures are good teaching material for the report and slides.
+
+## Unsupervised Ensemble: PatchCore + Autoencoder (Transistor)
+
+The two unsupervised detectors in the previous section fail differently — PatchCore measures distance to the nearest normal *feature*, the autoencoder measures *reconstruction error* — so their errors can be complementary. [src/models/run_patchcore_autoencoder_ensemble.py](src/models/run_patchcore_autoencoder_ensemble.py) (fusion helpers in [src/models/anomaly_fusion.py](src/models/anomaly_fusion.py)) fuses them at both the image-score and the heatmap level:
+
+```
+S_ens = α · norm(S_PatchCore) + (1 − α) · norm(S_AE)        # image score  (PatchCore: max patch distance, AE: mean error)
+H_ens = α · norm(H_PatchCore) + (1 − α) · norm(H_AE)        # 224×224 heatmap -> pixel threshold -> defect region
+```
+
+```bash
+# Needs the checkpoints from run_autoencoder.py (both --loss l2 and --loss ssim); PatchCore is re-fitted (~25 s).
+python -m src.models.run_patchcore_autoencoder_ensemble --config config/transistor_config.yaml --alpha 0.5
+```
+
+**Protocol (nothing tuned on the test set):**
+- **α = 0.5 was fixed before looking at any result.** Normal-only calibration cannot select α (AUROC needs defects), so the α sweep below is a *post-hoc sensitivity analysis* on the test set and did not feed back into the headline numbers.
+- Each detector's scores/heatmaps are z-score normalized using statistics of the **43 held-out normal calibration images only** (the same seed-42 split both detectors were already fit around). Test values are not clipped, so a strong outlier keeps its weight. A calibration-min/max variant is in the sweep.
+- The ensemble's image and pixel thresholds are the 95th percentile of the *fused* calibration scores/pixels (same rule as the single detectors); `keep_primary_region` (peak fraction 0.30) is applied to the fused heatmap exactly as for the single detectors; the 100-image test set is scored once.
+- PatchCore-only and autoencoder-only were re-evaluated inside the same script and reproduce the earlier tables exactly (0.9896 / 0.8313 / 0.8317 image AUROC), so any difference below is due to fusion only. Single seeded run; the results are deterministic but come from 100 test images (40 defective).
+
+| Detector (α = 0.5, z-score) | Image ROC-AUC | Pixel ROC-AUC | Accuracy | Precision | Recall | F1 | False alarms (good) | IoU / Dice (raw map) | IoU / Dice (after `keep_primary_region`) |
+|---|---|---|---|---|---|---|---|---|---|
+| PatchCore | 0.9896 | 0.9665 | 0.89 | 0.784 | 1.00 | 0.879 | 18.3% (11/60) | 0.252 / 0.352 | 0.315 / 0.455 |
+| Autoencoder, L2 | 0.8313 | 0.9115 | 0.75 | 0.778 | 0.525 | 0.627 | 10.0% (6/60) | 0.254 / 0.356 | 0.066 / 0.113 |
+| Autoencoder, SSIM | 0.8317 | 0.9294 | 0.75 | 0.826 | 0.475 | 0.603 | 6.7% (4/60) | 0.272 / 0.379 | 0.147 / 0.220 |
+| **PatchCore + AE-L2** | 0.9933 | **0.9723** | 0.92 | 0.833 | 1.00 | 0.909 | 13.3% (8/60) | 0.295 / **0.404** | 0.177 / 0.264 |
+| **PatchCore + AE-SSIM** | **0.9946** | 0.9690 | **0.94** | **0.870** | 1.00 | **0.930** | **10.0% (6/60)** | 0.294 / 0.401 | **0.385 / 0.526** |
+
+**Per defect type** — fraction flagged / good-vs-type image AUROC (ensemble columns at α = 0.5):
+
+| Defect type | PatchCore | PatchCore + AE-L2 | PatchCore + AE-SSIM |
+|---|---|---|---|
+| `bent_lead` | 1.00 / 1.000 | 1.00 / 0.998 | 1.00 / 0.998 |
+| `cut_lead` | 1.00 / 0.985 | 1.00 / 0.982 | 1.00 / 0.985 |
+| `damaged_case` | 1.00 / 0.998 | 1.00 / 0.993 | 1.00 / 0.995 |
+| `misplaced` | 1.00 / 0.975 | 1.00 / **1.000** | 1.00 / **1.000** |
+
+**Post-hoc α sensitivity** (image AUROC / pixel AUROC / F1 at the calibrated threshold; α = PatchCore weight, z-score; α = 1 is PatchCore alone, α = 0 the autoencoder alone; full sweep incl. IoU/Dice and the min-max normalizer in `outputs/metrics/ensemble_patchcore_autoencoder_transistor_metrics.json`):
+
+| α | 0.0 | 0.2 | 0.3 | 0.4 | **0.5** | 0.6 | 0.7 | 0.8 | 0.9 | 1.0 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| AE-L2 | 0.831 / 0.911 / 0.63 | 0.956 / 0.959 / 0.81 | 0.978 / 0.965 / 0.88 | 0.989 / 0.969 / 0.92 | **0.993 / 0.972 / 0.91** | 0.994 / 0.974 / 0.87 | 0.995 / 0.976 / 0.87 | 0.996 / 0.976 / 0.88 | 0.995 / 0.975 / 0.88 | 0.990 / 0.967 / 0.88 |
+| AE-SSIM | 0.832 / 0.929 / 0.60 | 0.964 / 0.954 / 0.82 | 0.983 / 0.961 / 0.91 | 0.991 / 0.966 / 0.94 | **0.995 / 0.969 / 0.93** | 0.995 / 0.971 / 0.91 | 0.995 / 0.972 / 0.88 | 0.993 / 0.972 / 0.88 | 0.992 / 0.970 / 0.88 | 0.990 / 0.967 / 0.88 |
+
+**Findings:**
+- **Fusion helps, modestly, on every axis except post-processed IoU for the MSE autoencoder.** Image AUROC rises 0.9896 → 0.9933 (L2) / 0.9946 (SSIM), pixel AUROC 0.9665 → 0.9723 / 0.9690, F1 0.879 → 0.909 / 0.930, with recall still 1.00 and false alarms down from 11/60 to 8/60 / 6/60. The AUROC gains are small (~0.4–0.5 points on 100 images, equivalent to a few good/defective pairs), so treat them as consistent but not statistically established; the precision/F1 gain is the larger practical effect.
+- **The complementarity is real and visible per type:** the autoencoder is perfect on the gross `misplaced` defect (1.000) where PatchCore is weakest (0.975), and the fused score inherits the 1.000. On the tiny `bent_lead` / `cut_lead` / `damaged_case` defects the autoencoder carries no useful signal (0.65–0.90 alone), so the ensemble stays at PatchCore's level there (0.982–0.998, within ±0.005 of PatchCore, with dips of at most 0.005 on `bent_lead`, `cut_lead` and `damaged_case`) — i.e. fusion does not add sensitivity to small defects, it removes PatchCore's weak spot and some false alarms.
+- **Fused heatmaps localize better as rankings (pixel AUROC, raw IoU/Dice 0.252/0.352 → 0.295/0.404 and 0.294/0.401), but the detector-specific `keep_primary_region` postprocessing interacts badly with the fusion for L2** (post-processed IoU/Dice 0.315/0.455 → 0.177/0.264) while it helps for SSIM (→ 0.385/0.526). The mixed heatmap's peak sometimes lands on a normal lead edge that the autoencoder over-weights (see `outputs/heatmaps/ensemble_patchcore_autoencoder_*_comparison.png`: PatchCore, autoencoder and ensemble maps side by side with the calibrated contour and the ground truth in green).
+- **α = 0.5 is reasonable, not optimal.** Image AUROC is flat (0.989–0.996) for α ∈ [0.4, 0.9]; F1 peaks at α ≈ 0.4–0.5 and degrades toward PatchCore's 0.879 for α ≥ 0.7, while post-processed IoU/Dice for the L2 ensemble keep improving toward α = 1. Min-max normalization (calibration range) gave the same picture (e.g. AE-L2 α = 0.5: 0.993 / 0.976 / F1 0.889). No α was selected from this table.
+
+**Recommendation:** the ensemble is a worthwhile *option* for transistor (cheap: one extra 23 ms/image forward pass of a 6.7M-parameter network, on top of the 25 s PatchCore fit and 3–4 min autoencoder training), with PatchCore + AE-SSIM the strongest variant. It is not yet wired into the Streamlit demo, which keeps the single PatchCore detector. Before adopting it generally, α should be chosen on a labelled validation split (not available here — MVTec ships labelled defects only in `test/`) and the result repeated over several seeds and the other categories.
+
 ## Hybrid Ensemble: Fusing the Classifier and PatchCore
 
 [src/models/run_ensemble.py](src/models/run_ensemble.py) fuses the supervised classifier's softmax "defective" probability with PatchCore's (min-max normalized) anomaly score into one weighted-average score, and evaluates classifier-only, PatchCore-only, and the fused ensemble side by side:
@@ -881,6 +1015,10 @@ python -m src.models.train_pca_lda_defect_classifier --config config/screw_confi
 - **The baseline supervised classifier's near-perfect scores are misleading.** Since MVTec's `train/` only contains `good` images, a supervised good-vs-defective classifier has to be trained on a split carved out of `test/` — meaning every defect *type* it's evaluated on was already seen during training. This produced accuracy/precision/recall/F1 all at 1.0, which reflects a tiny, easy, non-independent validation split rather than real-world generalization. Treat this model as a baseline/sanity-check only.
 - **Best-epoch restoration prevents a late training epoch from silently becoming the deployed model, while cross-validation exposes split sensitivity.** The baseline trainer now measures validation loss after every epoch, restores the lowest-loss weights, supports patience-based early stopping, and offers stratified K-fold evaluation with mean ± standard deviation and aggregate out-of-fold metrics. In the final seeded SimpleCNN verification run, validation loss improved through all 10 epochs (best/final validation loss 0.1645 at epoch 10), so early stopping correctly did not fire and accuracy/F1 remained 1.00/1.00; this confirms the control does not truncate a still-improving model. The K-fold mode saves evaluation artifacts separately and does not overwrite the deployable single-split checkpoint.
 - **The unsupervised PatchCore detector is the more trustworthy signal.** Trained only on a subset of `train/good` (no labels at all) and evaluated on the *entire* labeled test set, it scored a more believable 0.899 image-level ROC-AUC and 0.886 pixel-level AUROC — a much fairer estimate of how the system would behave on truly unseen defects.
+- **A from-scratch pixel autoencoder is a much weaker unsupervised detector than PatchCore — the pretrained feature space matters more than the "learn normal" idea itself.** On transistor, with identical calibration split, thresholds and metric code, a convolutional autoencoder reached 0.831 (MSE) / 0.832 (SSIM) image AUROC vs PatchCore's 0.990, and recall 0.53/0.48 vs 1.00. It was perfect on the gross `misplaced` defect (AUROC 1.000) but weak on small lead/case defects (0.65–0.90), because blurry reconstructions leave error on thin normal structures (leads, edges) in *every* image, burying small defects; varying the bottleneck from 32 to 512 dims moved AUROC by only ~1 point (0.820–0.831). **Lesson:** reconstruction error in raw pixel space confuses "hard to reconstruct" with "abnormal"; comparing in a pretrained feature space (PatchCore) separates the two far better. See [Unsupervised Comparison](#unsupervised-comparison-autoencoder-vs-patchcore-transistor).
+- **For the autoencoder, mean-reduction image scores beat max — the opposite of the usual "mean dilutes small defects" intuition.** Image AUROC was 0.831 (mean) vs 0.773 (max) for MSE and 0.832 vs 0.680 for SSIM. The max pixel of a reconstruction-error map usually sits on a normally-hard structure (a lead edge) on good *and* defective images alike, so it is mostly noise, whereas the mean benefits from large-area defects such as `misplaced`. PatchCore uses max successfully because its normal patches *do* find close matches in the memory bank. **Lesson:** the right score reduction depends on how much irreducible error the detector's map has on normal images — measure it per detector instead of copying PatchCore's choice.
+- **Localization postprocessing tuned for one detector can hurt another.** `keep_primary_region` (keep only the connected region around the map's peak) raised PatchCore's transistor IoU/Dice from 0.252/0.352 to 0.315/0.455, but cut the autoencoder's from 0.254/0.356 to 0.066/0.113 (MSE) and from 0.272/0.379 to 0.147/0.220 (SSIM) — the autoencoder's peak is often a normal lead edge, so the postprocessor keeps the wrong region and discards the real defect. Also, pooled raw IoU looked almost identical across all three detectors because it is dominated by `misplaced` (~42% mask area, IoU 0.62–0.65 for every method), while all three only reach ~0.09–0.21 IoU on the ~2% lead/case masks. **Lesson:** postprocessing settings belong to a detector, not just a category, and report pixel AUROC or per-defect-type numbers alongside pooled IoU/Dice when mask sizes vary this much.
+- **Fusing a strong and a weak detector helps only where the weak one is strong, and fusion interacts with detector-specific post-processing.** Averaging calibration-z-scored PatchCore and autoencoder scores (α = 0.5, fixed a priori) on transistor lifted image AUROC 0.9896 → 0.9933 (L2) / 0.9946 (SSIM) and F1 0.879 → 0.909 / 0.930 even though the autoencoder alone is at 0.83; the gain came from the gross `misplaced` type (0.975 → 1.000, where the autoencoder is perfect) plus fewer false alarms (11 → 8 / 6 of 60), while the tiny lead/case defects stayed at PatchCore's level. But `keep_primary_region` (tuned for PatchCore) halved the L2 ensemble's post-processed IoU/Dice (0.315/0.455 → 0.177/0.264) even though its raw IoU/Dice improved (0.252/0.352 → 0.295/0.404), and rose for SSIM (→ 0.385/0.526). **Lesson:** an ensemble does not need a strong second member, only one with a different failure profile — but re-validate every downstream component (thresholds, post-processing) on the fused output, and since α cannot be tuned from normal-only calibration data, report a sweep as sensitivity analysis rather than a selected value. See [Unsupervised Ensemble](#unsupervised-ensemble-patchcore--autoencoder-transistor).
 - **Picking a threshold by optimizing a metric on the final test set inflates that metric, even when the model itself never saw the labels.** The original PatchCore evaluation chose both the image and pixel decision thresholds via Youden's J *on the same 100-image test set* it then reported AUROC/accuracy/IoU/Dice on — no model weights leaked, but the decision boundary was implicitly the best possible one for that exact set. Switching to normal-only calibration (fit the memory bank on 80% of `train/good`, pick both thresholds from the 95th percentile of the other 20%'s scores, then score the full test set once) dropped mean IoU/Dice substantially across every category (e.g. screw 0.047→0.036, bottle 0.397→0.204, leather 0.127→0.019) even though pixel AUROC — a threshold-free ranking metric — barely moved for most categories. The gap between the old and new IoU/Dice numbers *is* the size of the test-set leakage that was previously baked into the pixel threshold. **Lesson:** a metric computed at a threshold chosen on that same evaluation set is not a trustworthy estimate of real-world performance, no matter how "unsupervised" the underlying model is — the leakage can hide entirely in the threshold, not the model.
 - **Percentile-based calibration on a small held-out set is a coarse false-alarm control, not an exact one.** Transistor's 95th-percentile image threshold, calibrated on only 43 held-out normal images, was aimed at a ~5% false-alarm rate but produced ~18% (11/60) on the actual test set — over 3× the target. With this few calibration images, percentile estimates have high variance; a category needing a tightly-controlled false-alarm rate would need either more `train/good` images to hold out or labelled calibration (see [Threshold Calibration](#threshold-calibration-normal-only-vs-labelled)) instead.
 - **A stronger backbone improves detection but not localization tightness.** Swapping PatchCore's frozen feature extractor from ResNet18 to WideResNet50-2 raised image ROC-AUC from 0.909 to 0.935, but mean IoU/Dice stayed roughly the same — both backbones produce patch features at the same coarse 28×28 grid, so the bilinear-upsampling blur (not backbone capacity) is the bottleneck for tight segmentation. (These specific numbers predate the calibration rework above; see the caveat on the [backbone comparison table](#patchcore-backbone-resnet18-vs-wideresnet50-2).)

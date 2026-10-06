@@ -50,6 +50,38 @@ def compute_per_class_report(
     )
 
 
+def compute_per_defect_type_detection(
+    defect_types: Sequence[str],
+    labels: Sequence[int],
+    scores: Sequence[float],
+    predictions: Sequence[int],
+) -> dict:
+    """Per defect type: how many images, how many were flagged defective at
+    the chosen threshold (recall for defect types, false-alarm rate for
+    "good"), and the good-vs-this-type image AUROC. Shows *which* defects a
+    detector misses, which a single pooled AUROC hides."""
+    defect_types = np.asarray(defect_types)
+    labels = np.asarray(labels).astype(int)
+    scores = np.asarray(scores, dtype=float)
+    predictions = np.asarray(predictions).astype(int)
+    good_mask = labels == 0
+
+    report = {}
+    for defect_type in sorted(set(defect_types.tolist())):
+        type_mask = defect_types == defect_type
+        entry = {
+            "count": int(type_mask.sum()),
+            "flagged_rate": float(predictions[type_mask].mean()),
+        }
+        if defect_type != "good" and good_mask.any():
+            pair_mask = good_mask | type_mask
+            entry["auroc_vs_good"] = float(
+                roc_auc_score(labels[pair_mask], scores[pair_mask])
+            )
+        report[defect_type] = entry
+    return report
+
+
 def youden_threshold(y_true: Sequence[int], scores: Sequence[float]) -> float:
     """Threshold that maximizes Youden's J statistic (TPR - FPR) on the ROC
     curve. Requires labelled defects, so it can only be computed on a
