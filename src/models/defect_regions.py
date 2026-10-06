@@ -90,19 +90,23 @@ def classify_defect_regions(
     defect_types: list,
     padding: int = 8,
     min_area: int = 30,
+    classifier_image_size: int | None = None,
 ) -> list:
     """Crop each connected anomalous region (padded) out of `resized_image`
     and run the whole-image defect-type classifier on each crop separately."""
     anomaly_map_np = anomaly_map.detach().cpu().numpy()
     binary_mask = anomaly_map_np >= threshold
     image_size = resized_image.size[0]
-    transform = get_val_transforms(image_size)
+    classifier_image_size = classifier_image_size or image_size
+    transform = get_val_transforms(classifier_image_size)
 
     regions = []
     for x, y, w, h, area in find_defect_regions(binary_mask, min_area=min_area):
         x0, y0 = max(0, x - padding), max(0, y - padding)
         x1, y1 = min(image_size, x + w + padding), min(image_size, y + h + padding)
-        crop = resized_image.crop((x0, y0, x1, y1)).resize((image_size, image_size))
+        crop = resized_image.crop((x0, y0, x1, y1)).resize(
+            (classifier_image_size, classifier_image_size)
+        )
 
         input_tensor = transform(crop).unsqueeze(0)
         with torch.no_grad():

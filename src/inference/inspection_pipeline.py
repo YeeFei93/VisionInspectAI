@@ -201,7 +201,9 @@ class InspectionPipeline:
             defect_model_available = defect_classifier is not None
             if defect_classifier is not None:
                 defect_model, type_names, metadata = defect_classifier
-                defect_input = input_tensor
+                defect_image_size = int(metadata.get("image_size", image_size))
+                defect_transform = get_val_transforms(defect_image_size)
+                defect_input = defect_transform(image).unsqueeze(0)
                 if metadata.get("crop_mode") == "defect_focused":
                     predicted_mask = np.logical_and(
                         localization_map.detach().cpu().numpy() >= pixel_threshold,
@@ -213,7 +215,7 @@ class InspectionPipeline:
                         padding_ratio=metadata.get("crop_padding_ratio", 0.25),
                         min_crop_fraction=metadata.get("min_crop_fraction", 0.25),
                     )
-                    defect_input = transform(defect_image).unsqueeze(0)
+                    defect_input = defect_transform(defect_image).unsqueeze(0)
 
                 defect_type, confidence = self._detect_defect_type(
                     defect_model, type_names, defect_input
@@ -229,6 +231,7 @@ class InspectionPipeline:
                     pixel_threshold,
                     defect_model,
                     type_names,
+                    classifier_image_size=defect_image_size,
                 )
                 distinct_regions = [
                     DefectPrediction(
@@ -402,8 +405,12 @@ class InspectionPipeline:
             return self._defect_classifiers[category]
 
         model_config = config["model"]
+        defect_config = config.get("defect_classifier", {})
+        classifier_architecture = defect_config.get(
+            "architecture", model_config["architecture"]
+        )
         base_name = (
-            f"defect_classifier_{model_config['architecture']}_{category}"
+            f"defect_classifier_{classifier_architecture}_{category}"
         )
         checkpoint_dir = self.project_root / config["output"]["checkpoint_dir"]
         metrics_dir = self.project_root / config["output"]["metrics_dir"]
@@ -431,7 +438,7 @@ class InspectionPipeline:
             metadata = json.load(metrics_file)
         defect_types = metadata["defect_types"]
         model = build_baseline_model(
-            architecture=model_config["architecture"],
+            architecture=classifier_architecture,
             num_classes=len(defect_types),
             pretrained=False,
         )

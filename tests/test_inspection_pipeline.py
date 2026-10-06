@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -100,6 +101,47 @@ def test_default_pipeline_routes_screw_to_high_resolution_config():
     pipeline = InspectionPipeline()
 
     assert pipeline.category_configs["screw"].name == "screw_config_highres_patchcore.yaml"
+
+
+def test_defect_classifier_uses_architecture_override(tmp_path, monkeypatch):
+    import src.inference.inspection_pipeline as inspection_pipeline
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    metrics_dir = tmp_path / "metrics"
+    checkpoint_dir.mkdir()
+    metrics_dir.mkdir()
+    run_name = "defect_classifier_convnext_tiny_screw"
+    model = torch.nn.Linear(1, 1)
+    torch.save(model.state_dict(), checkpoint_dir / f"{run_name}.pt")
+    (metrics_dir / f"{run_name}_metrics.json").write_text(
+        json.dumps({"defect_types": ["scratch"]}), encoding="utf-8"
+    )
+
+    requested = {}
+
+    def build_model(architecture, num_classes, pretrained):
+        requested["architecture"] = architecture
+        assert num_classes == 1
+        assert pretrained is False
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(inspection_pipeline, "build_baseline_model", build_model)
+    pipeline = InspectionPipeline(project_root=tmp_path)
+    loaded = pipeline._load_defect_classifier(
+        "screw",
+        {
+            "model": {"architecture": "resnet18"},
+            "defect_classifier": {"architecture": "convnext_tiny"},
+            "output": {
+                "checkpoint_dir": "checkpoints",
+                "metrics_dir": "metrics",
+            },
+        },
+    )
+
+    assert requested["architecture"] == "convnext_tiny"
+    assert loaded is not None
+    assert loaded[1] == ["scratch"]
 
 
 def test_keep_primary_anomaly_region_suppresses_disconnected_noise():

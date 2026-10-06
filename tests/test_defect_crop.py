@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from PIL import Image
 
 from src.data.dataset import ManifestImageDataset
+from src.models.defect_regions import classify_defect_regions
 from src.preprocessing.defect_crop import crop_to_defect, defect_crop_box
 
 
@@ -60,6 +62,32 @@ def test_manifest_dataset_applies_defect_mask_crop_before_transform(tmp_path):
 
     assert crop_size == (20, 20)
     assert label == 2
+
+
+def test_region_classifier_uses_classifier_image_size():
+    class ShapeRecordingModel(torch.nn.Module):
+        def forward(self, images):
+            self.input_shape = tuple(images.shape)
+            return torch.tensor([[0.9, 0.1]])
+
+    image = Image.new("RGB", (32, 32), "white")
+    anomaly_map = torch.zeros((32, 32))
+    anomaly_map[8:14, 8:14] = 0.8
+    model = ShapeRecordingModel()
+
+    regions = classify_defect_regions(
+        image,
+        anomaly_map,
+        threshold=0.5,
+        defect_model=model,
+        defect_types=["scratch", "dent"],
+        padding=0,
+        min_area=1,
+        classifier_image_size=16,
+    )
+
+    assert len(regions) == 1
+    assert model.input_shape == (1, 3, 16, 16)
 
 
 @pytest.mark.parametrize(

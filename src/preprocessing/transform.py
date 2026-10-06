@@ -1,16 +1,45 @@
 """Image transforms for supervised classifiers."""
 
-import random
-
+from PIL import Image
 from torchvision import transforms
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
+FLIP_LR = Image.Transpose.FLIP_LEFT_RIGHT
+FLIP_TB = Image.Transpose.FLIP_TOP_BOTTOM
+_VARIANT_OPS = {
+    "identity": (),
+    "hflip": (FLIP_LR,),
+    "vflip": (FLIP_TB,),
+    "rot90": (Image.Transpose.ROTATE_90,),
+    "rot180": (Image.Transpose.ROTATE_180,),
+    "rot270": (Image.Transpose.ROTATE_270,),
+}
+DEFAULT_DEFECT_VARIANTS = (
+    "identity", "hflip", "vflip", "rot90", "rot180", "rot270",
+)
 
-class _RandomQuarterTurn:
+
+def get_defect_augmentation_variants(category: str, defect_type: str) -> tuple:
+    """Fixed (non-random) variants generated for one training image."""
+    if category == "wood":
+        return ("identity", "hflip", "vflip")
+    if category == "transistor":
+        if defect_type == "misplaced":
+            return ("identity", "hflip", "vflip", "rot180")
+        return ("identity", "hflip")
+    return DEFAULT_DEFECT_VARIANTS
+
+
+class _ApplyVariant:
+    def __init__(self, variant: str):
+        self.operations = _VARIANT_OPS[variant]
+
     def __call__(self, image):
-        return image.rotate(random.choice((0, 90, 180, 270)))
+        for operation in self.operations:
+            image = image.transpose(operation)
+        return image
 
 
 def get_train_transforms(image_size: int = 224) -> transforms.Compose:
@@ -18,22 +47,20 @@ def get_train_transforms(image_size: int = 224) -> transforms.Compose:
         [
             transforms.Resize((image_size, image_size)),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]
     )
 
 
-def get_defect_classifier_train_transforms(
-    image_size: int = 224,
+def get_defect_variant_transform(
+    variant: str, image_size: int = 224
 ) -> transforms.Compose:
+    # Resize to a square first so quarter turns neither crop nor pad.
     return transforms.Compose(
         [
             transforms.Resize((image_size, image_size)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            _RandomQuarterTurn(),
+            _ApplyVariant(variant),
             transforms.ToTensor(),
             transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
         ]

@@ -5,6 +5,7 @@ from torchvision import models
 
 SUPPORTED_ARCHITECTURES = {
     "convnext_tiny",
+    "densenet121",
     "efficientnet_b0",
     "resnet18",
     "simple_cnn",
@@ -73,6 +74,10 @@ def build_baseline_model(
         weights = models.ConvNeXt_Tiny_Weights.DEFAULT if pretrained else None
         model = models.convnext_tiny(weights=weights)
         model.classifier[2] = nn.Linear(model.classifier[2].in_features, num_classes)
+    elif architecture == "densenet121":
+        weights = models.DenseNet121_Weights.DEFAULT if pretrained else None
+        model = models.densenet121(weights=weights)
+        model.classifier = nn.Linear(model.classifier.in_features, num_classes)
     elif architecture == "vit_b_16":
         weights = models.ViT_B_16_Weights.DEFAULT if pretrained else None
         model = models.vit_b_16(weights=weights)
@@ -104,6 +109,8 @@ def freeze_backbone(model: nn.Module, architecture: str) -> nn.Module:
         head = model.classifier[1]
     elif architecture == "convnext_tiny":
         head = model.classifier[2]
+    elif architecture == "densenet121":
+        head = model.classifier
     elif architecture == "vit_b_16":
         head = model.heads.head
     elif architecture == "simple_cnn":

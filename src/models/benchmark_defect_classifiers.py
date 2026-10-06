@@ -1,14 +1,14 @@
-"""Benchmark defect-type classifiers with matched splits and D4 augmentation.
+"""Benchmark defect-type classifiers with matched splits and deterministic augmentation.
 
-Runs a no-augmentation ResNet18 baseline, then compares D4-augmented ResNet18,
-ConvNeXt-Tiny, and EfficientNet-B0 models across the nine project categories.
-Validation probabilities are also combined with an equal-weight soft vote.
+Runs a no-augmentation ResNet18 baseline, then compares ResNet18, ConvNeXt-Tiny,
+EfficientNet-B0, and DenseNet121 trained on fixed flip/rotation variants of each
+training image (see get_defect_augmentation_variants) across the nine categories.
 """
 
 import argparse
-import copy
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +18,7 @@ import yaml
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from src.data.dataset import ManifestImageDataset
 from src.models.baseline_classifier import build_baseline_model
@@ -28,7 +28,8 @@ from src.models.train_defect_classifier import (
     train_with_early_stopping,
 )
 from src.preprocessing.transform import (
-    get_defect_classifier_train_transforms,
+    get_defect_augmentation_variants,
+    get_defect_variant_transform,
     get_val_transforms,
 )
 
@@ -43,22 +44,66 @@ CATEGORIES = (
     "tile",
     "transistor",
 )
-ARCHITECTURES = ("resnet18", "convnext_tiny", "efficientnet_b0")
-RUNS = (
-    ("resnet18", "none"),
-    ("resnet18", "d4"),
-    ("convnext_tiny", "d4"),
-    ("efficientnet_b0", "d4"),
+OUTPUT_PREFIX = "defect_classifier_variant_augmentation"
+SUPPORTED_ARCHITECTURES = (
+    "resnet18",
+    "convnext_tiny",
+    "efficientnet_b0",
+    "densenet121",
 )
+
+
+def expand_training_rows(rows, category):
+    """One row per fixed augmentation variant of each training image."""
+    expanded = []
+    for row in rows.to_dict(orient="records"):
+        for variant in get_defect_augmentation_variants(category, row["defect_type"]):
+            expanded.append({**row, "augmentation_variant": variant})
+    return pd.DataFrame(expanded)
+
+
+class VariantDataset(Dataset):
+    """Applies each expanded row's fixed variant to its (untransformed) image."""
+
+    def __init__(self, expanded_rows, image_size):
+        self.base = ManifestImageDataset(expanded_rows, PROJECT_ROOT)
+        self.variants = expanded_rows["augmentation_variant"].tolist()
+        self.transforms = {
+            variant: get_defect_variant_transform(variant, image_size)
+            for variant in set(self.variants)
+        }
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, index):
+        image, label = self.base[index]
+        return self.transforms[self.variants[index]](image), label
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--categories", nargs="+", choices=CATEGORIES, default=CATEGORIES)
+    parser.add_argument(
+        "--architectures",
+        nargs="+",
+        choices=SUPPORTED_ARCHITECTURES,
+        default=SUPPORTED_ARCHITECTURES,
+    )
+    parser.add_argument("--skip-baseline", action="store_true")
+    parser.add_argument("--save-deployment-checkpoints", action="store_true")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/metrics"))
+    parser.add_argument("--output-prefix", default=OUTPUT_PREFIX)
     parser.add_argument("--torch-threads", type=int, default=4)
     return parser.parse_args()
+
+
+def format_elapsed(seconds):
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def predict_probabilities(model, loader, device):
@@ -83,8 +128,11 @@ def classification_scores(y_true, probabilities):
     }
 
 
-def sample_std(values):
-    return float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+def save_deployment_artifacts(model, checkpoint_path: Path, metrics_path: Path, metadata):
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), checkpoint_path)
+    metrics_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
 def metric_record(category, architecture, augmentation, y_true, probabilities, history, best_epoch):
@@ -99,7 +147,17 @@ def metric_record(category, architecture, augmentation, y_true, probabilities, h
     }
 
 
-def run_category(category, epochs_override, device):
+def run_category(
+    category,
+    architectures,
+    include_baseline,
+    save_deployment_checkpoints,
+    epochs_override,
+    device,
+    category_index,
+    category_count,
+    benchmark_start,
+):
     config_path = PROJECT_ROOT / "config" / f"{category}_config.yaml"
     with config_path.open(encoding="utf-8") as config_file:
         config = yaml.safe_load(config_file)
@@ -117,10 +175,12 @@ def run_category(category, epochs_override, device):
     )
     train_rows = train_rows.reset_index(drop=True)
     val_rows = val_rows.reset_index(drop=True)
-    val_paths = val_rows["image_path"].tolist()
+    expanded_train_rows = expand_training_rows(train_rows, category)
     print(
-        f"\n{category}: {len(train_rows)} train / {len(val_rows)} validation; "
-        f"per-class counts={manifest['label'].value_counts().sort_index().to_dict()}"
+        f"\n{category}: {len(train_rows)} train ({len(expanded_train_rows)} with variants) / "
+        f"{len(val_rows)} validation; "
+        f"per-class counts={manifest['label'].value_counts().sort_index().to_dict()}",
+        flush=True,
     )
 
     image_size = data_cfg["image_size"]
@@ -134,22 +194,29 @@ def run_category(category, epochs_override, device):
         num_workers=train_cfg["num_workers"],
     )
 
+    runs = ([ ("resnet18", "none") ] if include_baseline else [])
+    runs.extend((architecture, "variants") for architecture in architectures)
     category_records = []
-    probabilities_by_run = {}
     y_true_reference = None
-    for architecture, augmentation in RUNS:
+    for model_index, (architecture, augmentation) in enumerate(runs, start=1):
+        model_start = time.perf_counter()
+        print(
+            f"PROGRESS category={category_index}/{category_count} {category} "
+            f"model={model_index}/{len(runs)} {architecture} status=START "
+            f"elapsed={format_elapsed(model_start - benchmark_start)}",
+            flush=True,
+        )
         seed = int(data_cfg["seed"])
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        train_transform = (
-            get_defect_classifier_train_transforms(image_size)
-            if augmentation == "d4"
-            else get_val_transforms(image_size)
-        )
-        train_dataset = ManifestImageDataset(
-            train_rows, PROJECT_ROOT, transform=train_transform
+        train_dataset = (
+            VariantDataset(expanded_train_rows, image_size)
+            if augmentation == "variants"
+            else ManifestImageDataset(
+                train_rows, PROJECT_ROOT, transform=get_val_transforms(image_size)
+            )
         )
         train_loader = DataLoader(
             train_dataset,
@@ -158,12 +225,10 @@ def run_category(category, epochs_override, device):
             num_workers=train_cfg["num_workers"],
         )
 
-        model_config = copy.deepcopy(config["model"])
-        model_config["architecture"] = architecture
         model = build_baseline_model(
             architecture=architecture,
             num_classes=len(defect_types),
-            pretrained=model_config["pretrained"],
+            pretrained=config["model"]["pretrained"],
         ).to(device)
         epochs = epochs_override if epochs_override is not None else train_cfg["epochs"]
         criterion = nn.CrossEntropyLoss()
@@ -198,41 +263,53 @@ def run_category(category, epochs_override, device):
         record.update(
             {
                 "train_images": len(train_rows),
+                "train_images_with_variants": len(train_dataset),
                 "val_images": len(val_rows),
                 "defect_types": len(defect_types),
                 "seed": seed,
             }
         )
         category_records.append(record)
-        probabilities_by_run[(architecture, augmentation)] = probabilities
+        if save_deployment_checkpoints and augmentation == "variants":
+            output_cfg = config["output"]
+            run_name = f"defect_classifier_{architecture}_{category}"
+            checkpoint_dir = PROJECT_ROOT / output_cfg["checkpoint_dir"]
+            metrics_dir = PROJECT_ROOT / output_cfg["metrics_dir"]
+            deployment_metadata = {
+                **record,
+                "defect_types": defect_types,
+                "pretrained": bool(config["model"]["pretrained"]),
+                "crop_mode": "full_image",
+                "validation_crop_source": None,
+                "crop_padding_ratio": 0.25,
+                "min_crop_fraction": 0.25,
+                "image_size": image_size,
+                "early_stopping_patience": int(
+                    train_cfg.get("early_stopping_patience", 3)
+                ),
+                "checkpoint": f"{run_name}.pt",
+            }
+            save_deployment_artifacts(
+                model,
+                checkpoint_dir / f"{run_name}.pt",
+                metrics_dir / f"{run_name}_metrics.json",
+                deployment_metadata,
+            )
         print(
             f"    val_accuracy={record['val_accuracy']:.4f}, "
             f"macro_f1={record['val_macro_f1']:.4f}, "
-            f"final_train_loss={record['final_train_loss']:.4f}"
+            f"final_train_loss={record['final_train_loss']:.4f}",
+            flush=True,
+        )
+        print(
+            f"PROGRESS category={category_index}/{category_count} {category} "
+            f"model={model_index}/{len(runs)} {architecture} status=DONE "
+            f"model_elapsed={format_elapsed(time.perf_counter() - model_start)} "
+            f"total_elapsed={format_elapsed(time.perf_counter() - benchmark_start)}",
+            flush=True,
         )
 
-    augmented_probabilities = np.mean(
-        [
-            probabilities_by_run[(architecture, "d4")]
-            for architecture in ARCHITECTURES
-        ],
-        axis=0,
-    )
-    ensemble_record = {
-        "category": category,
-        "architecture": "soft_vote_3_models",
-        "augmentation": "d4",
-        **classification_scores(y_true_reference, augmented_probabilities),
-        "train_images": len(train_rows),
-        "val_images": len(val_rows),
-        "defect_types": len(defect_types),
-        "seed": int(data_cfg["seed"]),
-    }
-    print(
-        f"  Soft vote: val_accuracy={ensemble_record['val_accuracy']:.4f}, "
-        f"macro_f1={ensemble_record['val_macro_f1']:.4f}"
-    )
-    return category_records, ensemble_record
+    return category_records
 
 
 def main() -> None:
@@ -241,6 +318,8 @@ def main() -> None:
         raise ValueError("--epochs must be positive")
     if args.torch_threads < 1:
         raise ValueError("--torch-threads must be positive")
+    if not args.architectures and args.skip_baseline:
+        raise ValueError("Select at least one architecture or include the baseline")
     torch.set_num_threads(args.torch_threads)
     device = torch.device(
         "cuda" if torch.cuda.is_available()
@@ -248,14 +327,24 @@ def main() -> None:
         else "cpu"
     )
     print(f"Using device: {device}; CPU threads: {args.torch_threads}")
-    print("Validation metrics are exploratory: all rows come from MVTec's labeled test split.")
+    print("Validation metrics are exploratory: all rows come from MVTec's labeled test split.", flush=True)
+    benchmark_start = time.perf_counter()
 
     all_records = []
-    ensemble_records = []
-    for category in args.categories:
-        category_records, ensemble_record = run_category(category, args.epochs, device)
-        all_records.extend(category_records)
-        ensemble_records.append(ensemble_record)
+    for category_index, category in enumerate(args.categories, start=1):
+        all_records.extend(
+            run_category(
+                category,
+                args.architectures,
+                not args.skip_baseline,
+                args.save_deployment_checkpoints,
+                args.epochs,
+                device,
+                category_index,
+                len(args.categories),
+                benchmark_start,
+            )
+        )
 
     output_dir = args.output_dir
     if not output_dir.is_absolute():
@@ -263,7 +352,6 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     runs = pd.DataFrame(all_records)
-    ensembles = pd.DataFrame(ensemble_records)
     group_columns = ["architecture", "augmentation"]
     summary = (
         runs.groupby(group_columns, as_index=False)
@@ -278,37 +366,31 @@ def main() -> None:
     )
     summary["std_val_accuracy"] = summary["std_val_accuracy"].fillna(0.0)
     summary["std_val_macro_f1"] = summary["std_val_macro_f1"].fillna(0.0)
-    ensemble_summary = {
-        "categories": int(ensembles["category"].nunique()),
-        "mean_val_accuracy": float(ensembles["val_accuracy"].mean()),
-        "std_val_accuracy": sample_std(ensembles["val_accuracy"].tolist()),
-        "mean_val_macro_f1": float(ensembles["val_macro_f1"].mean()),
-        "std_val_macro_f1": sample_std(ensembles["val_macro_f1"].tolist()),
-    }
 
-    runs.to_csv(output_dir / "defect_classifier_augmentation_runs.csv", index=False)
-    summary.to_csv(output_dir / "defect_classifier_augmentation_architecture_summary.csv", index=False)
-    ensembles.to_csv(output_dir / "defect_classifier_augmentation_ensemble.csv", index=False)
+    runs.to_csv(output_dir / f"{args.output_prefix}_runs.csv", index=False)
+    summary.to_csv(output_dir / f"{args.output_prefix}_architecture_summary.csv", index=False)
     results = {
         "device": str(device),
         "seed_policy": "category config seed reset before each model run",
         "split_policy": "one stratified train/validation split per category, reused for every run",
-        "augmentation": "random horizontal/vertical flips and exact rotations in {0, 90, 180, 270} degrees; training only",
-        "baseline": "ResNet18 with no random augmentation",
+        "augmentation": "deterministic per-image variants (flips and exact 90/180/270 rotations; wood flips only; transistor restricted); training only",
+        "architectures": args.architectures,
+        "baseline": "ResNet18 with no augmentation" if not args.skip_baseline else None,
+        "deployment_checkpoints_saved": args.save_deployment_checkpoints,
         "validation_caveat": "Validation images are drawn from MVTec's labeled test split; use independent data or nested CV for an unbiased final estimate.",
         "runs": all_records,
         "architecture_summary": summary.to_dict(orient="records"),
-        "ensemble_by_category": ensemble_records,
-        "ensemble_summary": ensemble_summary,
     }
-    (output_dir / "defect_classifier_augmentation_benchmark.json").write_text(
+    (output_dir / f"{args.output_prefix}_benchmark.json").write_text(
         json.dumps(results, indent=2), encoding="utf-8"
     )
     print("\nArchitecture summary (category means):")
     print(summary.to_string(index=False))
-    print("\nSoft-voting ensemble summary:")
-    print(json.dumps(ensemble_summary, indent=2))
-    print(f"\nSaved benchmark files under {output_dir}")
+    print(
+        f"\nSaved benchmark files under {output_dir}; "
+        f"total elapsed={format_elapsed(time.perf_counter() - benchmark_start)}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

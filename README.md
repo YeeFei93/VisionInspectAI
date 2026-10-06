@@ -941,38 +941,97 @@ Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.
 
 **Scaling to eight categories — grid, tile, and wood.** Adding three more defect-type classifiers reveals the wide variance in fine-grained accuracy even within a balanced 5-defect-type setup. **Grid** performs poorly (0.222 accuracy) — its defect types (bent, broken, glue, metal_contamination, thread) are subtle spatial/material variations on a regular geometric grid pattern, making them inherently confusable (the confusion matrix shows glue absorbing predictions from all other classes). **Tile** achieves excellent performance (0.923 accuracy, the second-best across all eight categories) — its defect types (crack, glue_strip, gray_stroke, oil, rough) are visually distinct surface phenomena (structural damage vs. surface contamination/discoloration), providing clear visual separation despite similar dataset size to grid. **Wood** reaches a middle ground (0.667 accuracy) — its defect types (color, combined, hole, liquid, scratch) include some visually distinct types (hole vs. scratch) but combined defects and color blotches are harder to disentangle from natural wood grain variation.
 
-**Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are. Screw (0.444) and grid (0.222) are cases where the defect types are inherently subtle or overlapping even with more training data; leather (0.964) and tile (0.923) succeed because their defect types are visually distinct phenomena. The task is fundamentally harder than object-category detection (100% accuracy across all eight categories) or binary good/defective classification (both are coarser-grained decisions with better natural class separation).
+**Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are. Screw (0.444) and grid (0.222) were the weakest under the original ResNet18 recipe (the [augmentation benchmark](#matched-augmentation-and-architecture-benchmark) below shows ConvNeXt-Tiny with fixed augmentation reaches 0.944 and 1.000 on them, so part of that gap came from training recipe and backbone rather than inherently overlapping defect types); leather (0.964) and tile (0.923) succeed because their defect types are visually distinct phenomena. The task is fundamentally harder than object-category detection (100% accuracy across all eight categories) or binary good/defective classification (both are coarser-grained decisions with better natural class separation).
 
 ### Matched augmentation and architecture benchmark
 
-**Script:** [src/models/benchmark_defect_classifiers.py](src/models/benchmark_defect_classifiers.py). The benchmark uses one seeded stratified 70/30 split per category, reused for all four runs: ResNet18 without augmentation (the before-augmentation baseline), then ResNet18, ConvNeXt-Tiny, and EfficientNet-B0 with the same training augmentation. Augmentation is limited to random horizontal/vertical flips and exact 90-degree rotations (0°, 90°, 180°, 270°); it is applied only to training images, while each image's defect-type ground-truth label is retained. Validation images are not augmented.
+**Script:** [src/models/benchmark_defect_classifiers.py](src/models/benchmark_defect_classifiers.py). One seeded stratified 70/30 split per category is reused for every run (469 train / 205 validation images in total). Each category gets five trainings: ResNet18 without augmentation (the before-augmentation baseline), then ResNet18, ConvNeXt-Tiny, EfficientNet-B0, and DenseNet121 on augmented training data.
 
-All models use the category config's pretrained setting, learning rate, and maximum 10-epoch budget with early stopping. Macro-F1 is reported to account for per-class performance; final train loss is the last completed epoch's loss, while validation predictions use the restored best-validation-loss checkpoint. Values below are `accuracy / macro-F1 / final train loss`.
+**Augmentation is deterministic and training-only.** Instead of random transforms, each training image is expanded into a fixed set of variants (generated on the fly from the original file; nothing is written to disk). The defect-type label is unchanged, validation images are never augmented, and images are resized to a square first so quarter turns neither crop nor pad. The rules live in `get_defect_augmentation_variants` ([src/preprocessing/transform.py](src/preprocessing/transform.py)):
 
-| Category | ResNet18, no augmentation | ResNet18, flips + 90° | ConvNeXt-Tiny, flips + 90° | EfficientNet-B0, flips + 90° |
+| Categories | Variants per training image |
+|---|---|
+| screw, bottle, hazelnut, carpet, leather, grid, tile | original, horizontal flip, vertical flip, 90°, 180°, 270° rotation (6) |
+| wood | original, horizontal flip, vertical flip (3) |
+| transistor, `misplaced` | original, horizontal flip, vertical flip, 180° rotation (4) |
+| transistor, other defect types | original, horizontal flip (2) |
+
+A combined horizontal+vertical flip is deliberately omitted because it is pixel-identical to a 180° rotation. `get_train_transforms()` (used by the good/defective and category classifiers) also no longer applies `RandomRotation(10)`. Training images grow from 469 to 2,590 (screw 83→498, bottle 44→264, hazelnut 49→294, carpet 62→372, leather 64→384, wood 42→126, grid 39→234, tile 58→348, transistor 28→70).
+
+All models use ImageNet-pretrained weights and each category's config for learning rate (1e-4), a 10-epoch cap, and early stopping (patience 3 on validation loss). Reported validation metrics use the restored best-validation-loss weights; final train loss is the last completed epoch's loss. Macro-F1 is reported to account for per-class performance. Values below are `accuracy / macro-F1 / final train loss`.
+
+**Compute caveat:** an augmented run sees 2–6× more samples (and weight updates) per epoch than the baseline, so the before/after gain bundles augmentation with more updates; a fixed-update-budget control was not run.
+
+**Streamlit deployment run:** the selected ConvNeXt-Tiny model was retrained on all nine categories with the same deterministic variants (no baseline, other architectures, or ensemble). Reproduce it with:
+
+```powershell
+python -u -m src.models.benchmark_defect_classifiers --architectures convnext_tiny --skip-baseline --save-deployment-checkpoints --output-prefix convnext_tiny_deployment --torch-threads 8
+```
+
+The runner writes each best-validation-loss model to `models/checkpoints/defect_classifier_convnext_tiny_<category>.pt` and a matching `outputs/metrics/defect_classifier_convnext_tiny_<category>_metrics.json` containing the ordered `defect_types` and `crop_mode` required by the Streamlit loader. Category configs select ConvNeXt-Tiny for the defect classifier only; the separate category and binary classifiers remain configured independently. The run log includes a flushed category/model progress line and elapsed time. The completed CPU run took 1:16:43, and all nine checkpoints loaded successfully through `InspectionPipeline`.
+
+| Category | ResNet18, no augmentation | ResNet18, augmented | ConvNeXt-Tiny, augmented | EfficientNet-B0, augmented | DenseNet121, augmented |
+|---|---:|---:|---:|---:|---:|
+| Screw | 0.194 / 0.160 / 0.1945 | 0.750 / 0.700 / 0.0928 | **0.944 / 0.943** / 0.0511 | 0.639 / 0.628 / 0.1025 | 0.917 / 0.914 / 0.0224 |
+| Bottle | **0.895 / 0.892** / 0.0053 | **0.895** / 0.885 / 0.0035 | 0.842 / 0.842 / 0.0051 | 0.842 / 0.842 / 0.0547 | **0.895 / 0.892** / 0.0192 |
+| Hazelnut | **0.905 / 0.909** / 0.0532 | **0.905** / 0.902 / 0.0068 | **0.905** / 0.902 / 0.0064 | **0.905** / 0.896 / 0.0281 | **0.905** / 0.896 / 0.0149 |
+| Carpet | 0.778 / 0.764 / 0.0087 | 0.889 / 0.883 / 0.0089 | **0.926 / 0.926** / 0.0117 | 0.815 / 0.818 / 0.0715 | 0.815 / 0.814 / 0.0428 |
+| Leather | 0.929 / 0.926 / 0.0072 | **1.000 / 1.000** / 0.0196 | **1.000 / 1.000** / 0.0019 | **1.000 / 1.000** / 0.0402 | **1.000 / 1.000** / 0.0183 |
+| Wood | 0.667 / 0.646 / 0.0106 | 0.778 / 0.729 / 0.0085 | 0.833 / 0.794 / 0.0156 | 0.722 / 0.687 / 0.2270 | **0.889 / 0.867** / 0.0223 |
+| Grid | 0.222 / 0.163 / 0.3959 | 0.278 / 0.210 / 0.1536 | **1.000 / 1.000** / 0.0052 | 0.444 / 0.420 / 0.4897 | 0.667 / 0.660 / 0.0475 |
+| Tile | 0.923 / 0.920 / 0.0131 | 0.962 / 0.960 / 0.0054 | **1.000 / 1.000** / 0.0008 | **1.000 / 1.000** / 0.0195 | **1.000 / 1.000** / 0.0115 |
+| Transistor | 0.667 / 0.667 / 0.0048 | 0.667 / 0.638 / 0.0255 | **0.917 / 0.914** / 0.0102 | **0.917 / 0.914** / 0.2461 | 0.750 / 0.731 / 0.0230 |
+
+Bold marks the best accuracy / macro-F1 in each row (ties are all bold). Architecture means give each category equal weight; standard deviations are across the nine categories.
+
+| Architecture / training | Mean validation accuracy ± SD | Mean macro-F1 ± SD | Mean final train loss | Parameters (ImageNet head) |
 |---|---:|---:|---:|---:|
-| Screw | 0.194 / 0.160 / 0.1915 | 0.500 / 0.456 / 0.7254 | 0.694 / 0.652 / 0.8174 | 0.222 / 0.192 / 1.3478 |
-| Bottle | 0.895 / 0.892 / 0.0053 | 0.895 / 0.892 / 0.0597 | 0.895 / 0.892 / 0.1141 | 0.737 / 0.739 / 0.4187 |
-| Hazelnut | 0.857 / 0.865 / 0.0520 | 0.905 / 0.896 / 0.1022 | 0.905 / 0.902 / 0.0363 | 0.619 / 0.605 / 0.6953 |
-| Carpet | 0.778 / 0.764 / 0.0087 | 0.778 / 0.781 / 0.1183 | 0.889 / 0.891 / 0.0636 | 0.704 / 0.670 / 1.1800 |
-| Leather | 0.929 / 0.926 / 0.0072 | 0.964 / 0.964 / 0.0719 | 1.000 / 1.000 / 0.0237 | 0.750 / 0.740 / 0.8877 |
-| Wood | 0.667 / 0.646 / 0.0106 | 0.722 / 0.652 / 0.1728 | 0.889 / 0.867 / 0.0636 | 0.556 / 0.393 / 1.1422 |
-| Grid | 0.222 / 0.163 / 0.3957 | 0.278 / 0.185 / 0.8089 | 0.667 / 0.671 / 0.5964 | 0.389 / 0.322 / 1.4159 |
-| Tile | 0.923 / 0.920 / 0.0131 | 1.000 / 1.000 / 0.0467 | 1.000 / 1.000 / 0.0089 | 0.885 / 0.874 / 0.7190 |
-| Transistor | 0.667 / 0.667 / 0.0048 | 0.500 / 0.450 / 0.1815 | 0.750 / 0.742 / 0.2091 | 0.333 / 0.333 / 0.9386 |
+| ResNet18, no augmentation | 0.687 ± 0.290 | 0.672 ± 0.308 | 0.0770 | 11.7M |
+| ResNet18, augmented | 0.791 ± 0.220 | 0.767 ± 0.242 | 0.0361 | 11.7M |
+| **ConvNeXt-Tiny, augmented** | **0.930 ± 0.064** | **0.925 ± 0.072** | **0.0120** | 28.6M |
+| EfficientNet-B0, augmented | 0.809 ± 0.182 | 0.801 ± 0.191 | 0.1421 | 5.3M |
+| DenseNet121, augmented | 0.871 ± 0.110 | 0.864 ± 0.114 | 0.0246 | 8.0M |
 
-Architecture means give each category equal weight; standard deviations are across the nine categories.
+**Augmentation effect (ResNet18, same split):** mean accuracy rose from 0.687 to 0.791 (+10.5 points) and macro-F1 from 0.672 to 0.767 (+9.5 points). No category's accuracy fell; the largest gain was screw (0.194 → 0.750), while bottle, hazelnut, and transistor were unchanged in accuracy and slightly lower in macro-F1. An earlier run with random flips and random quarter turns gave ResNet18 0.727 / 0.697 on the same splits, so fixed variants did better, though that comparison also carries run-to-run noise.
 
-| Architecture / training | Mean validation accuracy ± SD | Mean macro-F1 ± SD | Mean final train loss |
+**Architecture comparison:** ConvNeXt-Tiny had the highest mean accuracy and macro-F1, the lowest spread across categories (SD 0.064), and the lowest mean final train loss. It was best or tied-best in accuracy in 7 of 9 categories and trailed only in bottle (0.842 vs 0.895) and wood (0.833 vs DenseNet121's 0.889). Its largest margins were grid (1.000 vs 0.278–0.667 for the others) and screw (0.944 vs 0.639–0.917). DenseNet121 was second (0.871). EfficientNet-B0 had the highest mean final train loss (0.142; wood 0.227, grid 0.490, transistor 0.246), consistent with slower fitting under the 10-epoch cap, and its accuracy tracked that.
+
+**Recommendation:** settle on ConvNeXt-Tiny with the deterministic augmentation for defect-type classification; DenseNet121 is the smaller (8.0M vs 28.6M parameters) second choice. Treat the ranking as suggestive, not final: each validation set has only 12–36 images, so one image is worth 2.8–8.3 accuracy points, and much of ConvNeXt-Tiny's 5.9-point lead over DenseNet121 comes from grid (6 of 18 images). Rerunning the identical ResNet18 baseline gave hazelnut 0.857 in an earlier run versus 0.905 here (one image of 21), which is the size of run-to-run noise to expect. All images also come from MVTec's labeled `test/` data, so a held-out source, multiple seeds, or nested stratified cross-validation is needed before treating these as deployment estimates; the [ensemble comparisons](#ensemble-model-comparison-and-tracking) below remain exploratory for the same reason.
+
+### Ensemble model comparison and tracking
+
+**Script:** [src/models/run_defect_classifier_ensembles.py](src/models/run_defect_classifier_ensembles.py). It reuses the saved ConvNeXt-Tiny seed-42 deployment models, trains augmented ResNet18, EfficientNet-B0, and DenseNet121 members with seed 42, then trains three ConvNeXt-Tiny bagging members with seeds 42, 43, and 44. Each bagging member uses a class-stratified bootstrap sample (sampling with replacement within each defect type while preserving its training count). All members use the same seeded stratified train/validation split and the category-specific deterministic augmentation rules above. Alternative model and bagging-member weights are saved separately under `models/checkpoints/ensemble_members/`; the active Streamlit ConvNeXt checkpoints are not overwritten.
+
+The comparison excludes stacking and boosting. It evaluates four-model hard voting (ties resolved by mean probability), equal-weight soft voting, a ConvNeXt-heavy 70/10/10/10 soft vote, three-seed ConvNeXt bagging, and a category-routed single model (DenseNet121 for bottle/wood, ConvNeXt-Tiny for the other categories). Bottle and wood additionally compare ConvNeXt:DenseNet soft-vote weights of 25:75, 50:50, and 75:25. Per-category strategy metrics and per-image probabilities are saved to `outputs/metrics/defect_classifier_ensemble_runs.csv`, `outputs/metrics/defect_classifier_ensemble_summary.csv`, and `outputs/metrics/defect_classifier_ensemble_per_image_predictions.csv`. These validation comparisons are exploratory because the held-out rows come from MVTec's labeled `test/` data; weight selection must be confirmed using nested or repeated cross-validation before deployment.
+
+**Ensemble comparison:** values are validation accuracy / macro-F1. All strategies use the same per-category validation images.
+
+| Category | ConvNeXt single | Hard vote (4) | Equal soft vote (4) | ConvNeXt-heavy soft (70/10/10/10) | ConvNeXt bagging (3) | Category-routed single |
+|---|---:|---:|---:|---:|---:|---:|
+| Screw | 0.944 / 0.943 | 0.917 / 0.914 | 0.917 / 0.914 | 0.944 / 0.943 | 0.917 / 0.914 | 0.944 / 0.943 |
+| Bottle | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | 0.895 / 0.892 | 0.895 / 0.892 |
+| Hazelnut | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | **0.952 / 0.953** | 0.905 / 0.902 |
+| Carpet | 0.926 / 0.926 | 0.926 / 0.926 | **0.963 / 0.966** | 0.926 / 0.926 | 0.926 / 0.926 | 0.926 / 0.926 |
+| Leather | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| Wood | 0.833 / 0.794 | 0.889 / 0.867 | 0.833 / 0.808 | 0.833 / 0.794 | **0.944 / 0.931** | 0.889 / 0.867 |
+| Grid | 1.000 / 1.000 | 0.722 / 0.719 | 0.778 / 0.776 | 1.000 / 1.000 | 0.833 / 0.831 | 1.000 / 1.000 |
+| Tile | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| Transistor | 0.917 / 0.914 | 0.833 / 0.833 | 0.833 / 0.833 | 0.917 / 0.914 | 0.833 / 0.833 | 0.917 / 0.914 |
+
+| Strategy | Categories | Mean validation accuracy ± SD | Mean macro-F1 ± SD |
 |---|---:|---:|---:|
-| ResNet18, no augmentation | 0.681 ± 0.286 | 0.667 ± 0.304 | 0.0765 |
-| ResNet18, flips + 90° | 0.727 ± 0.250 | 0.697 ± 0.281 | 0.2542 |
-| ConvNeXt-Tiny, flips + 90° | **0.854 ± 0.123** | **0.846 ± 0.129** | 0.2148 |
-| EfficientNet-B0, flips + 90° | 0.577 ± 0.221 | 0.541 ± 0.236 | 0.9717 |
+| ConvNeXt-Tiny single model | 9 | **0.930 ± 0.064** | **0.925 ± 0.072** |
+| Four-model hard vote | 9 | 0.893 ± 0.087 | 0.889 ± 0.088 |
+| Four-model equal soft vote | 9 | 0.897 ± 0.080 | 0.894 ± 0.084 |
+| ConvNeXt-heavy soft vote (70/10/10/10) | 9 | **0.930 ± 0.064** | **0.925 ± 0.072** |
+| ConvNeXt bagging, 3 stratified-bootstrap seeds | 9 | 0.922 ± 0.061 | 0.920 ± 0.062 |
+| Category-routed single model | 9 | **0.942 ± 0.047** | **0.938 ± 0.051** |
 
-**Finding and recommendation:** flips/quarter-turns raised ResNet18's category-mean accuracy by 4.6 percentage points and macro-F1 by 3.0 points; the improvement was not universal (transistor fell from 0.667 to 0.500). ConvNeXt-Tiny was the strongest augmented architecture by both category-mean metrics and was best or tied-best in every category in this split, so it is the leading candidate for defect-type classification. EfficientNet-B0 did not improve on ResNet18 overall here. Treat these as exploratory results, not an unbiased estimate: all training and validation examples originate in MVTec's labeled `test/` data, and each category has only one small validation split. A held-out source or repeated nested stratified cross-validation is needed before locking in deployment performance.
+**Bottle/wood ConvNeXt:DenseNet vote sweep:** bottle scored 0.895 / 0.892 at 25:75, versus ConvNeXt alone at 0.842 / 0.842; 50:50 and 75:25 both scored 0.842 / 0.842. Wood scored 0.889 / 0.867 at all three ratios, matching DenseNet121 alone (0.889 / 0.867) and beating ConvNeXt alone (0.833 / 0.794). The targeted blends did not improve over the best single member.
 
-As a supplementary comparison, an equal-weight soft vote of the three augmented models reached mean validation accuracy **0.803 ± 0.168** and macro-F1 **0.786 ± 0.178** across categories. This is also measured on the same exploratory validation splits; it does not establish that an ensemble will generalize better than ConvNeXt-Tiny.
+**Finding:** ordinary voting did not improve over ConvNeXt-Tiny. The 70%-ConvNeXt vote preserved exactly the same category decisions as ConvNeXt alone; equal and hard voting reduced mean accuracy by 3.3 and 3.7 points, respectively. Three-seed bagging averaged 0.922 / 0.920, slightly below the single model (0.930 / 0.925); it helped bottle, hazelnut, and wood but lost 16.7 accuracy points on grid. The category-routed policy has the highest observed mean, but DenseNet was assigned to bottle and wood after inspecting these same validation outcomes. That is post-hoc model selection, not an unbiased ensemble result. Treat routing as a candidate to test inside nested cross-validation, not as a confirmed deployment gain.
+
+The run took 6:36:36 on CPU. It saved 54 additional member checkpoints and metadata files under `models/checkpoints/ensemble_members/` and `outputs/metrics/ensemble_members/`. The shared prediction CSV supports error-by-image review; the progress log records category, member, sampling method, and elapsed time. These results share the same small MVTec `test/`-derived validation splits as the architecture benchmark, so they are useful for screening methods, not final model selection.
 
 ### Defect-focused crop ablation
 
@@ -1028,6 +1087,8 @@ python -m src.models.train_pca_lda_defect_classifier --config config/screw_confi
 - **An ensemble can't out-perform a classifier that's already at its evaluation ceiling — but it clearly helps once neither component signal is already perfect.** On screw, fusing the supervised classifier with PatchCore's score seemed like an obvious way to get the best of both, but on the classifier's own held-out validation subset the classifier alone already hits AUROC 1.0 (for the same reason its plain validation metrics are inflated — see above), so there's no room left for the ensemble to improve on. Extending the same comparison to all nine trained categories (see [Extending the ensemble comparison to all eight categories](#extending-the-ensemble-comparison-to-all-eight-categories) above) showed this was specific to screw's ceiling, not a general property of ensembling: bottle, carpet, and grid all have both individual signals below 1.0 AUROC, and the fused ensemble clearly beat both there (grid 0.870/0.880 individually → 0.954 fused AUROC; carpet → 1.000; bottle → 0.982). Tile was the one case where fusing *hurt* slightly, because PatchCore alone was already perfect there and blending in the weaker classifier pulled the score down. A fusion technique can only be shown to add value when at least one component signal still has headroom left to fill — check both individual AUROCs per category before assuming ensembling will (or won't) help.
 - **High pixel AUROC does not imply tight defect segmentation.** Mean IoU/Dice came out low (~0.04/0.07) even though pixel AUROC was high. The anomaly map is produced on a coarse 28×28 feature grid and bilinearly upsampled to 224×224, so it's good at *ranking* defect pixels highly (localizing the general region) but blurry compared to MVTec's tight ground-truth masks. Pixel AUROC and IoU/Dice answer different questions and should be reported together, not interchangeably.
 - **Higher spatial resolution can amplify structured-background false positives.** Moving transistor from 224px to 320px while retaining `layer2+layer3` reduced image/pixel AUROC from `0.9975`/`0.9608` to `0.9763`/`0.8759` and mean IoU/Dice from `0.2482`/`0.3507` to `0.1951`/`0.2826`; switching to shallower `layer1+layer2` features reduced them further to `0.9171`/`0.7233` and `0.1608`/`0.2484`. On `cut_lead/001.png`, the shallow model's strongest response moved off the defect and onto the perforated board. Finer localization is not just a resolution choice: shallow features can become more sensitive to repeating background edges than to the defect itself, so high-resolution variants must be validated per category before deployment.
+- **Fixed flip/quarter-turn augmentation plus a stronger backbone turned the two "hardest" defect-type categories from near-chance into usable.** With deterministic variants, ResNet18 rose from 0.687 to 0.791 mean accuracy, and ConvNeXt-Tiny reached 0.944 on screw (ResNet18 baseline 0.194) and 1.000 on grid (0.222), so the earlier reading that screw and grid defect types were inherently confusable was too strong. The gain bundles augmentation with 2–6× more updates per epoch, and validation sets are only 12–36 images, so confirm with multiple seeds or cross-validation. Takeaway: before attributing a low defect-type score to ambiguous classes, test augmentation and backbone capacity first.
+- **An identical-config rerun can shift a tiny validation set by a whole image.** The ResNet18 no-augmentation baseline gave hazelnut 0.857 in one run and 0.905 in a rerun (one image of 21, 4.8 points) with the same seed and split but a different thread count. Differences of one or two images between models, such as bottle (0.842 vs 0.895) and wood, are within that noise.
 - **`.gitignore` patterns without a leading `/` match at any depth.** An earlier `data/` rule (meant to exclude the raw MVTec dataset) was silently also excluding `src/data/`, so real source code was never staged. Always sanity-check ignore rules with `git check-ignore -v <path>` and `git status --ignored` before trusting `git add -A`.
 - **Virtual environments need explicit, exact ignore entries.** `.venv/` in `.gitignore` did not match a second environment folder named `.venv-1/`, which had all project dependencies installed — a `git add -A` would have swept hundreds of MB of installed packages into the repo if left unnoticed.
 - **Without foreground masking, the anomaly heatmap bleeds into the background.** Since PatchCore scores every patch (including plain background), and each image's heatmap is min-max normalized independently, small background texture/contrast differences got stretched into visible red/yellow — mimicking a real defect signal even though nothing was wrong there. Adding a simple Otsu-threshold foreground mask ([src/preprocessing/segmentation.py](src/preprocessing/segmentation.py)) to suppress background patches (pinning them to the object's minimum anomaly distance) fixed this without hurting detection accuracy (image AUROC 0.91 → 0.909, pixel AUROC 0.973 → 0.976) — a good reminder that per-image score normalization can amplify noise anywhere the model doesn't explicitly ignore it.
