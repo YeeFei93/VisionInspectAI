@@ -598,7 +598,7 @@ Training on all nine configured categories (screw, bottle, hazelnut, carpet, lea
 
 ## Unsupervised PatchCore Anomaly Detection
 
-### PacthCore Backbone: ResNet18 vs WideResNet50-2
+### PatchCore Backbone: ResNet18 vs WideResNet50-2
 
 Same memory bank size (2000 patches), same coreset/foreground-masking settings — only the frozen feature-extractor backbone changes (`config/screw_config_wide_resnet50_2.yaml`).
 
@@ -1039,7 +1039,7 @@ Bold marks the best accuracy / macro-F1 in each row (ties are all bold). Archite
 
 **Recommendation:** settle on ConvNeXt-Tiny with the deterministic augmentation for defect-type classification; DenseNet121 is the smaller (8.0M vs 28.6M parameters) second choice. Treat the ranking as suggestive, not final: each validation set has only 12–36 images, so one image is worth 2.8–8.3 accuracy points, and much of ConvNeXt-Tiny's 5.9-point lead over DenseNet121 comes from grid (6 of 18 images). Rerunning the identical ResNet18 baseline gave hazelnut 0.857 in an earlier run versus 0.905 here (one image of 21), which is the size of run-to-run noise to expect. All images also come from MVTec's labeled `test/` data, so a held-out source, multiple seeds, or nested stratified cross-validation is needed before treating these as deployment estimates; the [ensemble comparisons](#ensemble-model-comparison-and-tracking) below remain exploratory for the same reason.
 
-### Ensemble model comparison and tracking
+## Ensemble model comparisons and tracking
 
 **Script:** [src/models/run_defect_classifier_ensembles.py](src/models/run_defect_classifier_ensembles.py). It reuses the saved ConvNeXt-Tiny seed-42 deployment models, trains augmented ResNet18, EfficientNet-B0, and DenseNet121 members with seed 42, then trains three ConvNeXt-Tiny bagging members with seeds 42, 43, and 44. Each bagging member uses a class-stratified bootstrap sample (sampling with replacement within each defect type while preserving its training count). All members use the same seeded stratified train/validation split and the category-specific deterministic augmentation rules above. Alternative model and bagging-member weights are saved separately under `models/checkpoints/ensemble_members/`; the active Streamlit ConvNeXt checkpoints are not overwritten.
 
@@ -1049,22 +1049,22 @@ The comparison excludes stacking and boosting. It evaluates four-model hard voti
 
 | Category | ConvNeXt single | Hard vote (4) | Equal soft vote (4) | ConvNeXt-heavy soft (70/10/10/10) | ConvNeXt bagging (3) | Category-routed single |
 |---|---:|---:|---:|---:|---:|---:|
-| Screw | 0.944 / 0.943 | 0.917 / 0.914 | 0.917 / 0.914 | 0.944 / 0.943 | 0.917 / 0.914 | 0.944 / 0.943 |
-| Bottle | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | 0.895 / 0.892 | 0.895 / 0.892 |
+| Screw | **0.944 / 0.943** | 0.917 / 0.914 | 0.917 / 0.914 | **0.944 / 0.943** | 0.917 / 0.914 | **0.944 / 0.943** |
+| Bottle | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | 0.842 / 0.842 | **0.895 / 0.892** | **0.895 / 0.892** |
 | Hazelnut | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | **0.952 / 0.953** | 0.905 / 0.902 |
 | Carpet | 0.926 / 0.926 | 0.926 / 0.926 | **0.963 / 0.966** | 0.926 / 0.926 | 0.926 / 0.926 | 0.926 / 0.926 |
-| Leather | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| Leather | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** |
 | Wood | 0.833 / 0.794 | 0.889 / 0.867 | 0.833 / 0.808 | 0.833 / 0.794 | **0.944 / 0.931** | 0.889 / 0.867 |
-| Grid | 1.000 / 1.000 | 0.722 / 0.719 | 0.778 / 0.776 | 1.000 / 1.000 | 0.833 / 0.831 | 1.000 / 1.000 |
-| Tile | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
-| Transistor | 0.917 / 0.914 | 0.833 / 0.833 | 0.833 / 0.833 | 0.917 / 0.914 | 0.833 / 0.833 | 0.917 / 0.914 |
+| Grid | **1.000 / 1.000** | 0.722 / 0.719 | 0.778 / 0.776 | **1.000 / 1.000** | 0.833 / 0.831 | **1.000 / 1.000** |
+| Tile | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** |
+| Transistor | **0.917 / 0.914** | 0.833 / 0.833 | 0.833 / 0.833 | **0.917 / 0.914** | 0.833 / 0.833 | **0.917 / 0.914** |
 
 | Strategy | Categories | Mean validation accuracy ± SD | Mean macro-F1 ± SD |
 |---|---:|---:|---:|
-| ConvNeXt-Tiny single model | 9 | **0.930 ± 0.064** | **0.925 ± 0.072** |
+| ConvNeXt-Tiny single model | 9 | 0.930 ± 0.064 | 0.925 ± 0.072 |
 | Four-model hard vote | 9 | 0.893 ± 0.087 | 0.889 ± 0.088 |
 | Four-model equal soft vote | 9 | 0.897 ± 0.080 | 0.894 ± 0.084 |
-| ConvNeXt-heavy soft vote (70/10/10/10) | 9 | **0.930 ± 0.064** | **0.925 ± 0.072** |
+| ConvNeXt-heavy soft vote (70/10/10/10) | 9 | 0.930 ± 0.064 | 0.925 ± 0.072 |
 | ConvNeXt bagging, 3 stratified-bootstrap seeds | 9 | 0.922 ± 0.061 | 0.920 ± 0.062 |
 | Category-routed single model | 9 | **0.942 ± 0.047** | **0.938 ± 0.051** |
 
