@@ -20,6 +20,7 @@ train:
   early_stopping_min_delta: 0.0
 
 defect_classifier:
+  architecture: convnext_tiny
   use_focused_crops: true
   crop_source: patchcore
 

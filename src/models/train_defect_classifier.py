@@ -256,6 +256,9 @@ def run_cross_validation(dev_manifest, defect_types, config, args, device, folds
     misclassified image can swing accuracy by several percentage points."""
     data_cfg = config["data"]
     model_cfg = config["model"]
+    defect_architecture = config.get("defect_classifier", {}).get(
+        "architecture", model_cfg["architecture"]
+    )
     train_cfg = config["train"]
 
     if folds < 2:
@@ -282,12 +285,12 @@ def run_cross_validation(dev_manifest, defect_types, config, args, device, folds
         train_loader, val_loader = build_loaders(train_subset, val_subset, data_cfg, train_cfg, crop_kwargs)
 
         model = build_baseline_model(
-            architecture=model_cfg["architecture"],
+            architecture=defect_architecture,
             num_classes=len(defect_types),
             pretrained=model_cfg["pretrained"],
         ).to(device)
         if args.freeze_backbone:
-            model = freeze_backbone(model, model_cfg["architecture"])
+            model = freeze_backbone(model, defect_architecture)
 
         y_true, y_pred, training_summary = train_with_early_stopping(
             model, train_loader, val_loader, train_cfg, learning_rate, epochs, device
@@ -399,6 +402,9 @@ def main() -> None:
     category = config.get("category", "screw")
     data_cfg = config["data"]
     model_cfg = config["model"]
+    defect_architecture = config.get("defect_classifier", {}).get(
+        "architecture", model_cfg["architecture"]
+    )
     train_cfg = config["train"]
     output_cfg = config["output"]
 
@@ -435,7 +441,7 @@ def main() -> None:
     for directory in (checkpoint_dir, metrics_dir, figures_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    run_name = f"defect_classifier_{model_cfg['architecture']}_{category}"
+    run_name = f"defect_classifier_{defect_architecture}_{category}"
     if args.defect_focused_crops:
         run_name += "_focused"
         if args.crop_source == "patchcore":
@@ -472,12 +478,12 @@ def main() -> None:
         return
 
     model = build_baseline_model(
-        architecture=model_cfg["architecture"],
+        architecture=defect_architecture,
         num_classes=len(defect_types),
         pretrained=model_cfg["pretrained"],
     ).to(device)
     if args.freeze_backbone:
-        model = freeze_backbone(model, model_cfg["architecture"])
+        model = freeze_backbone(model, defect_architecture)
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Backbone frozen; trainable parameters: {trainable}")
 

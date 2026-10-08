@@ -11,6 +11,10 @@ model:
   pretrained: true
   num_classes: 2
 
+defect_classifier:
+  architecture: convnext_tiny
+  use_focused_crops: false
+
 train:
   batch_size: 16
   epochs: 10
