@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.models.benchmark_defect_classifiers import (
     classification_scores,
@@ -12,6 +15,24 @@ from src.models.run_defect_classifier_ensembles import (
     stratified_bootstrap_rows,
     weighted_soft_vote,
 )
+from src.models.train_defect_classifier import build_defect_manifest
+
+
+def test_build_defect_manifest_rejects_single_defect_type(monkeypatch):
+    manifest = pd.DataFrame(
+        {
+            "split": ["test", "test"],
+            "label": [1, 1],
+            "defect_type": ["defective", "defective"],
+        }
+    )
+    monkeypatch.setattr(
+        "src.models.train_defect_classifier.load_manifest",
+        lambda _path: manifest,
+    )
+
+    with pytest.raises(ValueError, match="at least two distinct defect types"):
+        build_defect_manifest(Path("unused.csv"))
 
 
 def test_classification_scores_reports_accuracy_and_macro_f1():

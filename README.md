@@ -1,5 +1,5 @@
 # VisionInspectAI
-Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently trained/evaluated end-to-end on `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, and `transistor`; the Streamlit demo auto-detects which one was uploaded.
+Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently configured and routed through the Streamlit demo for all 15 categories: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor`, `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, and `zipper`.
 
 ## Getting Started (New Clone Setup)
 
@@ -31,11 +31,11 @@ data/mvtec_anomaly_detection/
 		ground_truth/<defect_type>/...
 ```
 
-At minimum, grab the categories this project is already configured for: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, and `transistor`. (You only need the top-level dataset archive, or the individual per-category archives for these nine.)
+Grab all 15 categories configured for the demo: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor`, `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, and `zipper`. (You only need the top-level dataset archive, or the individual per-category archives for these categories.)
 
 ### 3. Build manifests, train the models, and launch the demo
 
-Repeat for each category (`screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor`):
+Repeat for each of the 15 categories above (the commands below show `screw` as an example):
 
 ```bash
 python -m src.data.create_manifest --category screw
@@ -43,10 +43,10 @@ python -m src.models.train_baseline --config config/screw_config.yaml
 python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 ```
 
-Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all nine manifests exist:
+Then train the category classifier (needed for the Streamlit demo's auto-detect feature) once all 15 manifests exist:
 
 ```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile transistor
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile transistor cable capsule metal_nut pill toothbrush zipper
 ```
 
 Optionally, train each category's defect-type classifier (needed for the Streamlit demo to show *what kind* of defect was found, not just Normal/Defective):
@@ -108,7 +108,7 @@ This project combines multiple pattern recognition / machine learning aspects, a
 ## Quick Start
 
 ```bash
-# 1. Build the manifest CSV for a category
+# 1. Build the manifest CSV for each category (example: screw)
 python -m src.data.create_manifest --category screw
 
 # 2. Train the supervised baseline classifier
@@ -117,7 +117,10 @@ python -m src.models.train_baseline --config config/screw_config.yaml
 # Optional: obtain a more reliable mean ± standard deviation with 5-fold CV
 python -m src.models.train_baseline --config config/screw_config.yaml --cross-validation --folds 5
 
-# 3. Train and evaluate the unsupervised PatchCore anomaly detector
+# 3. Train the category classifier (once manifests exist for all 15 categories)
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile transistor cable capsule metal_nut pill toothbrush zipper
+
+# 4. Train and evaluate the unsupervised PatchCore anomaly detector
 python -m src.models.run_anomaly_detection --config config/screw_config.yaml
 
 # Optional: reconstruction-based alternative (convolutional autoencoder), same evaluation protocol.
@@ -127,7 +130,7 @@ python -m src.models.run_autoencoder --config config/transistor_config.yaml --lo
 # Optional: fuse PatchCore + autoencoder (needs both autoencoder checkpoints above), alpha = PatchCore weight
 python -m src.models.run_patchcore_autoencoder_ensemble --config config/transistor_config.yaml --alpha 0.5
 
-# 4. (optional) Train the per-category defect-type classifier (what kind of defect is it?)
+# 5. (optional) Train the per-category defect-type classifier (what kind of defect is it?)
 python -m src.models.train_defect_classifier --config config/screw_config.yaml
 
 # Screw option: train on deployment-matched PatchCore defect crops
@@ -140,14 +143,11 @@ python -m src.models.train_defect_classifier --config config/wood_config.yaml \
   --freeze-backbone --holdout-per-class 2 --cross-validation --folds 4
 python -m src.models.train_defect_classifier --config config/wood_config.yaml \
   --freeze-backbone --holdout-per-class 2
-**Algorithm:** the same `build_baseline_model` architecture as the category's `config/<category>_config.yaml` (ResNet18 by default), with an `N`-way head (`N` = number of defect types for that category), trained with cross-entropy + Adam for 10 epochs. Training seeds NumPy/PyTorch from `data.seed` so full-image and crop experiments are reproducible.
 
-Add `--defect-focused-crops --crop-source patchcore` to crop each image around the region above the saved PatchCore pixel threshold before resize/augmentation. This uses the same predicted localization available in Streamlit, with 25% context padding and a minimum crop side of 25% of the shorter image dimension by default. `--crop-source ground-truth` is available as an oracle ablation, but its validation score is not a deployment estimate because uploaded images have no ground-truth masks.
-
-# 5. Launch the interactive demo (auto-detects the category from the uploaded image)
+# 6. Launch the interactive demo (auto-detects the category from the uploaded image)
 streamlit run app/streamlit_app.py
 
-# 6. Run the unit tests
+# 7. Run the unit tests
 python -m pytest tests/ -v
 ```
 
@@ -203,10 +203,10 @@ for unsupervised defect localization.
 
 To compare baseline classifier architectures, point `train_baseline.py` at any of `config/screw_config.yaml` (ResNet18), `config/screw_config_efficientnet_b0.yaml`, `config/screw_config_convnext_tiny.yaml`, `config/screw_config_vit_b_16.yaml`, or `config/screw_config_simple_cnn.yaml` — each writes its own checkpoint/metrics file so results don't overwrite each other.
 
-To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
+To run the full pipeline on a different MVTec-AD category, copy `config/screw_config.yaml` to `config/<category>_config.yaml`, update `category` and `data.manifest_path`, then repeat steps 1–4 with `--category <category>` / `--config config/<category>_config.yaml`. Already set up this way: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor`, `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, and `zipper` (see [Generalization to Other Categories](#generalization-to-other-categories) below). After adding a new category, retrain the category classifier so the Streamlit demo can auto-detect it too:
 
 ```bash
-python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile transistor <new_category>
+python -m src.models.train_category_classifier --categories screw bottle hazelnut carpet leather wood grid tile transistor cable capsule metal_nut pill toothbrush zipper <new_category>
 ```
 
 ## Pipeline Steps in Detail
@@ -270,7 +270,7 @@ Training is seeded (`--seed`, default 42), evaluates on the validation split eve
 1. **Locally-aware patch features:** a frozen, ImageNet-pretrained backbone (`anomaly_detection.backbone`: `resnet18` or `wide_resnet50_2`) extracts feature maps from two intermediate layers (`layer2`, `layer3`), each 3×3-average-pooled for local context and concatenated into one multi-scale patch feature map.
 2. **Memory bank via greedy coreset:** all patch features from every `train/good` image are subsampled with a greedy k-center coreset algorithm (`_greedy_coreset`) — starting from a seeded patch, it repeatedly keeps the patch farthest from everything already selected — down to `anomaly_detection.coreset_ratio` of the pool, capped at `max_coreset_size` (2000) patches. Distance comparisons use a lower-dimensional projection for speed: Johnson–Lindenstrauss random projection by default, or the experimental data-dependent PCA projection when `anomaly_detection.projection_method: pca`/`--projection-method pca` is selected. The memory bank always stores the original, non-projected features.
 3. **Scoring:** by default, each query patch's anomaly score is its distance to the nearest memory-bank patch (`num_neighbors: 1`). For the k-NN ablation, it is the mean of the `k` smallest distances. The image score is the maximum patch score; optional PatchCore softmax reweighting multiplies that maximum by one minus the nearest normal patch's softmax probability among its local memory-bank support. Reweighting changes only the image score, while k-NN also changes the heatmap. `compute_foreground_mask` can pin background patches to the object's minimum score before the max; the per-patch grid is bilinearly upsampled to form the heatmap.
-4. **Thresholding — normal-only calibration (default when `anomaly_detection.calibration.enabled: true`, set for all nine canonical category configs):** `train/good` is split into a fitting subset (`calibration.holdout_ratio`, default 80%) that the memory bank is built from, and a held-out normal calibration subset (default 20%) that is *only* scored, never used to fit the memory bank. The image threshold is the `calibration.percentile`-th percentile (default 95th) of the calibration subset's image scores, and the pixel threshold is the same percentile of its per-pixel scores — chosen independently, since a percentile that controls image-level false alarms doesn't necessarily control pixel-level ones. The memory bank + both thresholds are then frozen and the full, untouched 100-image MVTec test set is scored exactly once. This never lets the final test set influence the decision boundary (unlike picking a threshold by maximizing a metric on that same test set). The split (image paths) and both thresholds are saved to `outputs/metrics/patchcore_<backbone>_<category>_calibration_split.json` for reproducibility. Because only ~40–80 held-out normal images set each percentile, the false-alarm rate it controls for is approximate, not exact (e.g. transistor targets a 5% calibration false-alarm rate off 43 images but measures ~18% on the full test set — coarse by design, see [Notes & Lessons Learned](#notes--lessons-learned)). Set `calibration.enabled: false` (or `--no-calibration`) to fall back to the legacy behavior below; this remains the default for the architecture/hyperparameter-tuning configs (e.g. `screw_config_wide_resnet50_2.yaml`) that this rework did not re-run.
+4. **Thresholding — normal-only calibration (default when `anomaly_detection.calibration.enabled: true`, set for all 15 standard category configs):** `train/good` is split into a fitting subset (`calibration.holdout_ratio`, default 80%) that the memory bank is built from, and a held-out normal calibration subset (default 20%) that is *only* scored, never used to fit the memory bank. The image threshold is the `calibration.percentile`-th percentile (default 95th) of the calibration subset's image scores, and the pixel threshold is the same percentile of its per-pixel scores — chosen independently, since a percentile that controls image-level false alarms doesn't necessarily control pixel-level ones. The memory bank + both thresholds are then frozen and the full, untouched 100-image MVTec test set is scored exactly once. This never lets the final test set influence the decision boundary (unlike picking a threshold by maximizing a metric on that same test set). The split (image paths) and both thresholds are saved to `outputs/metrics/patchcore_<backbone>_<category>_calibration_split.json` for reproducibility. Because only ~40–80 held-out normal images set each percentile, the false-alarm rate it controls for is approximate, not exact (e.g. transistor targets a 5% calibration false-alarm rate off 43 images but measures ~18% on the full test set — coarse by design, see [Notes & Lessons Learned](#notes--lessons-learned)). Set `calibration.enabled: false` (or `--no-calibration`) to fall back to the legacy behavior below; this remains the default for the architecture/hyperparameter-tuning configs (e.g. `screw_config_wide_resnet50_2.yaml`) that this rework did not re-run.
    **Legacy (non-calibration) thresholding:** the good/defective decision boundary is chosen by maximizing Youden's J statistic (`youden_threshold`) directly on the ROC curve of image scores over the test set — simple, but it lets the final test set choose its own decision boundary.
 
 **Evaluation** ([src/evaluation/metrics.py](src/evaluation/metrics.py)): image-level ROC-AUC + accuracy/precision/recall/F1 at the image threshold, plus pixel-level ROC-AUC (heatmap vs. ground-truth mask over every test pixel) and mean IoU/Dice (predicted vs. ground-truth defect mask at the pixel threshold, defect images only). AUROC itself is threshold-free and computed on the full test set either way.
@@ -374,63 +374,73 @@ Same train/val split (112/48 images carved from `test/`), same maximum 10 epochs
 | ResNet18 | Transfer learning (CNN) | 11.2M | ✅ ImageNet | 0.010 | 1.00 / 1.00 / 1.00 / 1.00 |
 | EfficientNet-B0 | Transfer learning (CNN) | 4.0M | ✅ ImageNet | 0.041 | 1.00 / 1.00 / 1.00 / 1.00 |
 | ConvNeXt-Tiny | Transfer learning (modern CNN) | 27.8M | ✅ ImageNet | **0.002** | 1.00 / 1.00 / 1.00 / 1.00 |
+| DenseNet121 | Transfer learning (CNN) | 8.0M | ✅ ImageNet | 0.095 | 1.00 / 1.00 / 1.00 / 1.00 |
 | ViT-B/16 | Transfer learning (vision transformer) | 85.8M | ✅ ImageNet | 0.081 | 1.00 / 1.00 / 1.00 / 1.00 |
 | Simple CNN (sequential) | From-scratch CNN | 0.25M | ❌ | 0.175 | 1.00 / 1.00 / 1.00 / 1.00 |
 | PatchCore (ResNet18 features) | Unsupervised anomaly detection | — | ✅ ImageNet (frozen) | n/a | Image ROC-AUC 0.90, Pixel ROC-AUC 0.89 |
 
-**Finding:** all five supervised classifiers hit the same perfect validation score, because (per the lesson below) the validation split is tiny and every defect type in it was already seen during training — accuracy/F1 cannot distinguish them. The **training loss curve and resource cost are more informative signals**: ConvNeXt-Tiny reached the lowest final loss (0.0024), followed by ResNet18 (0.010), EfficientNet-B0 (0.041), ViT-B/16 (0.081), and the from-scratch Simple CNN (0.175). ViT's loss was also less stable (including a spike to 1.057 at epoch 4) and it is by far the largest model at 85.8M parameters; on only 112 training images, its weaker image-locality inductive bias and higher capacity offer no measurable validation benefit over the CNNs. ConvNeXt is a strong modern-CNN result, but its 27.8M parameters likewise buy no validation-score gain over the much smaller 4.0M EfficientNet-B0. **Recommendation:** keep EfficientNet-B0 or ResNet18 as the practical supervised baseline, use ConvNeXt-Tiny as the strongest-convergence architecture comparison, and treat ViT-B/16 as an educational architecture ablation rather than a performance upgrade on this tiny dataset. PatchCore remains the more trustworthy detector because it does not depend on the supervised model's leaky validation setup (and, since the [threshold calibration rework](#threshold-calibration-normal-only-vs-labelled), no longer picks its own decision threshold by looking at the test set either).
+**Finding:** all six supervised classifiers hit the same perfect validation score, because (per the lesson below) the validation split is tiny and every defect type in it was already seen during training — accuracy/F1 cannot distinguish them. The **training loss curve and resource cost are more informative signals**: ConvNeXt-Tiny reached the lowest final loss (0.0024), followed by ResNet18 (0.010), EfficientNet-B0 (0.041), ViT-B/16 (0.081), DenseNet121 (0.095), and the from-scratch Simple CNN (0.175). ViT's loss was also less stable (including a spike to 1.057 at epoch 4) and it is by far the largest model at 85.8M parameters; on only 112 training images, its weaker image-locality inductive bias and higher capacity offer no measurable validation benefit over the CNNs. ConvNeXt is a strong modern-CNN result, but its 27.8M parameters likewise buy no validation-score gain over the much smaller 4.0M EfficientNet-B0; DenseNet121 also reaches the same score with an intermediate 8.0M parameter budget.
+
+**Recommendation:** keep EfficientNet-B0, DenseNet121, or ResNet18 as practical supervised baselines, use ConvNeXt-Tiny as the strongest-convergence architecture comparison, and treat ViT-B/16 as an educational architecture ablation rather than a performance upgrade on this tiny dataset. PatchCore remains the more trustworthy detector because it does not depend on the supervised model's leaky validation setup (and, since the [threshold calibration rework](#threshold-calibration-normal-only-vs-labelled), no longer picks its own decision threshold by looking at the test set either).
 
 **Cross-validation status:** stratified K-fold execution, out-of-fold aggregation, and best-epoch restoration are implemented and covered by tests, but a complete five-fold architecture benchmark has not yet been run or added to this table. Generate it per architecture with `--cross-validation --folds 5`; compare the reported mean ± standard deviation rather than a single fold's score.
 
-## Supervised Baseline Classifier Architecture Comparison (5 Categories × 5 Architectures)
+## Supervised Baseline Classifier Architecture Comparison (5 Categories × 6 Architectures)
 
-To understand whether the choice of ResNet18 as the supervised baseline carries across categories, we trained all five architectures on **screw** (the primary category) and expanded to four additional representative categories: **hazelnut, transistor, wood, and tile**.
+To understand whether the choice of ResNet18 as the supervised baseline carries across categories, we trained all six architectures on **screw** (the primary category) and expanded to four additional representative categories: **hazelnut, transistor, wood, and tile**.
 
 | Model | Type | Params | Pretrained | Learning Type | Description |
 |---|---|---:|---|---|---|
 | ResNet18 | CNN | 11.2M | ImageNet-1K | Transfer learning; fine-tuned | Residual CNN reference baseline. |
 | ConvNeXt-Tiny | Modern CNN | 27.8M | ImageNet-1K | Transfer learning; fine-tuned | Modernized convolutional design with higher capacity than ResNet18. |
+| DenseNet121 | Densely connected CNN | 8.0M | ImageNet-1K | Transfer learning; fine-tuned | Feature-reuse CNN with an intermediate parameter budget. |
 | EfficientNet-B0 | Efficient CNN | 4.0M | ImageNet-1K | Transfer learning; fine-tuned | Compound-scaled, lightweight CNN alternative. |
 | ViT-B/16 | Vision Transformer | 85.8M | ImageNet-1K | Transfer learning; fine-tuned | Processes 16×16 image patches with self-attention; largest model in this comparison. |
 | Simple CNN | Sequential CNN | 0.25M | No | Supervised; trained from scratch | Small four-block convolutional network used as a from-scratch reference. |
 
 All runs use the same protocol: train/val split from each category's test set (`val_split: 0.3`), same optimizer (Adam, LR 0.0001), up to 10 epochs with early stopping (patience 3). **Note:** for older metrics files (ResNet18 on hazelnut, wood, tile), only val accuracy/F1/precision/recall are available; final training loss is shown only where the full history was recorded.
 
-**Comparison Results Table (5 Categories × 5 Architectures, 25 Complete):**
+**Comparison Results Table (5 Categories × 6 Architectures, 30 Complete):**
 
 | Category | Architecture | Final Train Loss | Val Accuracy | Val Precision | Val Recall | Val F1 |
 |---|---|---|---|---|---|---|
 | **screw** | ResNet18 | — | **1.000** | 1.000 | 1.000 | **1.000** |
 | | ConvNeXt-Tiny | 0.004 | **1.000** | 1.000 | 1.000 | **1.000** |
+| | DenseNet121 | 0.095 | **1.000** | 1.000 | 1.000 | **1.000** |
 | | Simple CNN | 0.180 | **1.000** | 1.000 | 1.000 | **1.000** |
 | | EfficientNet-B0 | 0.025 | 0.979 | 0.973 | 1.000 | 0.986 |
 | | ViT-B/16 | 0.416 | 0.958 | 0.947 | 1.000 | 0.973 |
 | **hazelnut** | ConvNeXt-Tiny | 0.001 | **1.000** | 1.000 | 1.000 | **1.000** |
+| | DenseNet121 | 0.043 | **1.000** | 1.000 | 1.000 | **1.000** |
 | | ViT-B/16 | 0.210 | **1.000** | 1.000 | 1.000 | **1.000** |
 | | ResNet18 | — | 0.970 | 0.955 | 1.000 | 0.977 |
 | | EfficientNet-B0 | 0.108 | 0.939 | 0.913 | 1.000 | 0.955 |
 | | Simple CNN | 0.525 | 0.364 | 0.000 | 0.000 | 0.000 |
 | **transistor** | ResNet18 | 0.034 | **0.967** | 1.000 | 0.917 | **0.957** |
+| | DenseNet121 | 0.057 | 0.867 | 1.000 | 0.667 | 0.800 |
 | | EfficientNet-B0 | 0.332 | 0.900 | 1.000 | 0.750 | 0.857 |
 | | ConvNeXt-Tiny | 0.292 | 0.900 | 1.000 | 0.750 | 0.857 |
 | | ViT-B/16 | 0.682 | 0.600 | 0.000 | 0.000 | 0.000 |
 | | Simple CNN | 0.587 | 0.600 | 0.000 | 0.000 | 0.000 |
 | **wood** | ResNet18 | — | **1.000** | 1.000 | 1.000 | **1.000** |
 | | ConvNeXt-Tiny | 0.003 | **1.000** | 1.000 | 1.000 | **1.000** |
+| | DenseNet121 | 0.009 | **1.000** | 1.000 | 1.000 | **1.000** |
 | | EfficientNet-B0 | 0.252 | 0.958 | 1.000 | 0.944 | 0.971 |
 | | ViT-B/16 | 0.004 | 0.958 | 1.000 | 0.944 | 0.971 |
 | | Simple CNN | 0.513 | 0.250 | 0.000 | 0.000 | 0.000 |
 | **tile** | Tie: ConvNeXt-Tiny, ViT-B/16 | 0.024, 0.404 | **0.972** | 1.000, 1.000 | 0.962, 0.962 | **0.980** |
+| | DenseNet121 | 0.014 | 0.944 | 0.962 | 0.962 | 0.962 |
 | | ResNet18 | — | 0.944 | 0.929 | 1.000 | 0.963 |
 | | EfficientNet-B0 | 0.204 | 0.917 | 1.000 | 0.885 | 0.939 |
 | | Simple CNN | 0.517 | 0.806 | 0.788 | 1.000 | 0.881 |
 
-**Summary by Architecture (Mean ± Std across 5 categories, all 25 models complete):**
+**Summary by Architecture (Mean ± Std across 5 categories, all 30 models complete):**
 
 | Architecture | Avg Val Accuracy | Avg Val F1 | Avg Final Train Loss |
 |---|---|---|---|
 | **ResNet18** | **97.62%** | **97.92%** | 0.034 |
-| **ConvNeXt-Tiny** | **97.44%** | 96.75% | 0.065 |
+| ConvNeXt-Tiny | 97.44% | 96.75% | 0.065 |
+| DenseNet121 | 96.22% | 95.23% | 0.044 |
 | EfficientNet-B0 | 93.87% | 94.16% | 0.184 |
 | ViT-B/16 | 89.78% | 78.50% | 0.343 |
 | Simple CNN | 60.38% | 37.63% | 0.464 |
@@ -445,45 +455,45 @@ All runs use the same protocol: train/val split from each category's test set (`
 | wood | Tie: ResNet18, ConvNeXt-Tiny | 100.0% | Perfect classification; EfficientNet-B0 and ViT-B/16 both achieve 95.8% |
 | tile | Tie: ConvNeXt-Tiny, ViT-B/16 | 97.2% | Both achieve identical accuracy and F1; ResNet18 at 94.4%; shows both modern architectures excel on texture-based defects |
 
-**Overall Ranking (Final, all 25 models complete):**
+**Overall Ranking (Final, all 30 models complete):**
 
-1. **ResNet18** — 97.62% average accuracy, most consistent across all categories, best final loss (0.034), **strong default choice**
-2. **ConvNeXt-Tiny** — 97.44% average accuracy (−0.18pp vs ResNet18), competitive, excels on specific categories (hazelnut, tile), 2.5× more parameters, slightly higher loss suggests slower convergence but achieves comparable final performance
-3. **EfficientNet-B0** — 93.87% average accuracy, lightweight (4.0M params), viable for edge deployment with category-specific tuning
-4. **ViT-B/16** — 89.78% average accuracy, large (85.8M params), surprisingly strong on simple texture categories (hazelnut 100%, tile 97.2%), but poor on task-specific defects (transistor: 60%); per-category performance volatile, suggesting transformer needs larger or more diverse training data
-5. **Simple CNN** — 60.38% average accuracy, from-scratch learning fails on most categories; only viable on anomalous cases (screw) with tiny, visually-trivial validation sets
+1. **ResNet18** — 97.62% average accuracy, most consistent across all categories, strong default choice
+2. **ConvNeXt-Tiny** — 97.44% average accuracy (−0.18pp vs ResNet18), competitive, excels on specific categories (hazelnut, tile), but uses 2.5× more parameters
+3. **DenseNet121** — 96.22% average accuracy and 95.23% F1 with 8.0M parameters; a strong compact alternative, limited mainly by transistor (86.7%)
+4. **EfficientNet-B0** — 93.87% average accuracy, lightweight (4.0M params), viable for edge deployment with category-specific tuning
+5. **ViT-B/16** — 89.78% average accuracy, large (85.8M params), surprisingly strong on simple texture categories but poor on transistor; per-category performance is volatile
+6. **Simple CNN** — 60.38% average accuracy, from-scratch learning fails on most categories; only viable on anomalous cases with tiny, visually-trivial validation sets
 
 **Key Findings:**
 
-1. **ResNet18 and ConvNeXt-Tiny are virtually equivalent** (97.62% vs 97.44%), with different strength profiles: ResNet18 is stable and generalizes on all categories; ConvNeXt-Tiny is stronger on specific ones (hazelnut, tile) but slightly slower to converge (loss 0.065 vs 0.034). Both are production-viable. ConvNeXt's 2.5× larger parameter count (27.8M vs 11.2M) makes ResNet18 preferable for latency-sensitive deployments.
+1. **ResNet18 and ConvNeXt-Tiny remain virtually equivalent** (97.62% vs 97.44%), while DenseNet121 is a close third at 96.22% with only 8.0M parameters. ResNet18 is stable across all categories; ConvNeXt-Tiny is stronger on selected texture categories; DenseNet121 provides a useful accuracy/size compromise but drops to 86.7% on transistor. ConvNeXt's 2.5× larger parameter count makes ResNet18 or DenseNet121 preferable for latency-sensitive deployments.
 
 2. **Vision Transformers (ViT-B/16) show category-dependent performance** (89.78% vs 97.62%), excelling on simple, uniform defects (hazelnut 100%, tile 97.2% tied with ConvNeXt) but failing catastrophically on fine-grained defects (transistor 60%). ViT's attention mechanism is highly effective for texture-based anomalies but lacks local spatial priors needed for detailed defect discrimination. **Lesson:** architecture strength is task-dependent; no single model dominates all categories.
 
 3. **ConvNeXt-Tiny achieves 100% accuracy on hazelnut and 97.2% on tile**, matching ViT-B/16 on tile and outperforming ResNet18 (97%, 94.4%), suggesting modern CNN design (depth-wise convolution, layer normalization) better captures texture-based and multi-defect-type categories. ConvNeXt represents a natural evolution from ResNet18 with similar inductive biases but improved feature extraction.
 
-4. **EfficientNet-B0 (93.87%) falls behind both ResNet18 and ConvNeXt-Tiny**, despite competitive efficiency claims. Its lightweight design (4.0M params) comes at a 3.75pp accuracy cost; recommend for edge-only scenarios where model size is critical constraint.
+4. **EfficientNet-B0 (93.87%) falls behind ResNet18, ConvNeXt-Tiny, and DenseNet121**, despite competitive efficiency claims. Its lightweight design (4.0M params) comes at a 2.35pp accuracy cost versus DenseNet121; recommend it for edge-only scenarios where model size is the primary constraint.
 
 5. **Simple CNN and ViT-B/16 failure patterns reveal dataset-architecture mismatches**: Simple CNN memorizes trivial visual defects (screw 100%) but fails on subtle ones (transistor 60%, hazelnut 36%). ViT-B/16's per-category volatility (range 60%–100%) shows transformers need larger datasets to amortize attention overhead; on tiny splits with class imbalance, this architecture is unreliable. CNNs with built-in spatial hierarchies (ResNet, ConvNeXt) succeed consistently.
 
 6. **Transformer models show high variance across categories**: ViT-B/16 ranges from 60% (transistor) to 100% (hazelnut), a 40pp spread. This suggests instability on small datasets; the model struggles to learn task-specific features when training data is limited. In contrast, CNN architectures show ±5pp variance, indicating better robustness to dataset variation.
 
-7. **Plots (loss curves, accuracy curves, confusion matrices) are available for all 5 categories × 5 architectures** at:
-   - Loss/accuracy curves: `outputs/figures/baseline_comparison_loss_accuracy_<category>.png` (now shows all 5 architectures, including ViT-B/16 tile)
-   - Confusion matrices: `outputs/figures/baseline_comparison_confusion_matrices_<category>.png` (now shows all 5 architectures, including ViT-B/16 tile)
+7. **The DenseNet121 run artifacts are available for all 5 categories** at `outputs/metrics/baseline_densenet121_<category>_metrics.json` and the corresponding checkpoint/figure paths under `models/checkpoints/` and `outputs/figures/`. The comparison now covers 5 categories × 6 architectures; existing comparison plots should be regenerated if a six-architecture visual summary is required.
 
 **Decision: Why ResNet18 Remains the Production Choice**
 
-Despite ConvNeXt-Tiny's competitive performance (97.44% vs 97.62%), **ResNet18 remains the justified production baseline classifier** for the following reasons:
+Despite ConvNeXt-Tiny's competitive performance (97.44% vs 97.62%) and DenseNet121's strong compact result (96.22%), **ResNet18 remains the justified production baseline classifier** for the following reasons:
 
-- **Accuracy:** ResNet18 and ConvNeXt-Tiny are statistically equivalent (97.62% vs 97.44%, Δ < 0.2pp). ResNet18 wins on 3 of 5 categories; ConvNeXt-Tiny on 2.
-- **Efficiency:** ResNet18 has 11.2M parameters vs ConvNeXt-Tiny's 27.8M (2.5× smaller). Real-time inference latency is significantly lower, critical for the Streamlit demo's interactive use case.
-- **Stability:** ResNet18's lower training loss (0.034 vs 0.065) indicates faster convergence and less overfitting risk on tiny validation splits. Better generalizes to new categories without retuning.
+- **Accuracy:** ResNet18 and ConvNeXt-Tiny are statistically equivalent (97.62% vs 97.44%, Δ < 0.2pp); DenseNet121 remains competitive at 96.22%. ResNet18 wins on 3 of 5 categories, ConvNeXt-Tiny on 2, and DenseNet121 matches the top score on screw, hazelnut, and wood.
+- **Efficiency:** ResNet18 has 11.2M parameters versus ConvNeXt-Tiny's 27.8M, while DenseNet121 has 8.0M. ResNet18 remains the established latency/accuracy compromise for the Streamlit demo.
+- **Stability:** ResNet18's lower mean training loss (0.034 versus DenseNet121's 0.044 and ConvNeXt-Tiny's 0.065) indicates faster convergence and less overfitting risk on tiny validation splits.
 - **Industry Standard:** ResNet18 is the de-facto transfer learning baseline. Extensive documentation, pretrained weights from multiple sources, and community support ensure long-term maintainability.
 - **Robustness:** ResNet18 performs consistently across all 5 tested categories (94–100%), with no catastrophic failures. ConvNeXt-Tiny's success on hazelnut and tile comes with weaker performance trade-offs on other categories.
 
 **Production Alternatives:**
 - **ConvNeXt-Tiny** (97.44% accuracy, 27.8M params): Choose if per-category accuracy tuning is acceptable and model size is not a constraint. Stronger on texture-based defects (tile, wood).
-- **EfficientNet-B0** (93.87% accuracy, 4.0M params): Choose only if model size is the primary constraint (e.g., embedded QA systems); accept 3.75pp accuracy loss.
+- **DenseNet121** (96.22% accuracy, 8.0M params): Choose when a smaller model than ConvNeXt-Tiny is preferred while retaining performance close to the top two models; validate carefully on transistor-like fine-grained defects.
+- **EfficientNet-B0** (93.87% accuracy, 4.0M params): Choose only if model size is the primary constraint (e.g., embedded QA systems); accept the accuracy trade-off.
 - **Avoid ViT-B/16 and SimpleCNN** for this task: ViT's transformer overhead adds complexity without benefit on small datasets; SimpleCNN fails on real-world defect categories.
 
 ### Classical Machine Learning Alternatives: PCA + LDA on frozen ResNet18 Embeddings Baseline Classifier
@@ -576,23 +586,23 @@ unsupervised anomaly localization.
 
 ## Supervised Category Classifier
 
-### Category Classifier Benchmark — 9 Categories
+### Category Classifier Benchmark — All 15 Categories
 
-Training on all nine configured categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor) with 3,367 total images (2,399 train / 968 validation) using ResNet18's superior performance for baseline classifier yielded the following results:
+Training on all 15 MVTec-AD categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) with 5,354 total images (3,629 train / 1,725 validation) using ResNet18's superior performance for the baseline classifier yielded the following results:
 
 | Metric | Result |
 |---|---|
 | Validation accuracy | **1.0000** |
 | Best epoch | 6 (out of 8) |
 | Per-class precision/recall/F1 | 1.0 / 1.0 / 1.0 (all categories) |
-| Training set size | 2,399 images |
-| Validation set size | 968 images |
+| Training set size | 3,629 images |
+| Validation set size | 1,725 images |
 
 **Visualizations:**
 - [Training curves](outputs/figures/category_classifier_resnet18_training_curves.png): train/validation loss converge smoothly to near-zero; validation accuracy reaches 1.0 by epoch 2 and stays perfect through epoch 8.
-- [Confusion matrix](outputs/figures/category_classifier_resnet18_confusion_matrix.png): perfect diagonal matrix with zero misclassifications across all nine categories.
+- [Confusion matrix](outputs/figures/category_classifier_resnet18_confusion_matrix.png): perfect diagonal matrix with zero misclassifications across all 15 categories.
 
-**Finding:** whole object categories remain visually distinct and perfectly separable even at nine-category scale. Unlike the supervised good/defective baseline (which hits perfect metrics due to a tiny held-out split drawn from the same test set), this category classifier achieves 100% accuracy on the object-type task because the nine MVTec categories have massive visual differences (bottle's cylindrical top vs. screw's hexagonal head vs. carpet's flat textile surface, etc.) — this is a genuinely easy classification problem with clear natural clustering.
+**Finding:** whole object categories remain visually distinct and perfectly separable even at the full 15-category scale. Unlike the supervised good/defective baseline (which hits perfect metrics due to a tiny held-out split drawn from the same test set), this category classifier achieves 100% accuracy on the object-type task because the MVTec categories have massive visual differences (bottle's cylindrical top vs. screw's hexagonal head vs. carpet's flat textile surface, etc.) — this is a genuinely easy classification problem with clear natural clustering.
 
 
 
@@ -873,13 +883,13 @@ Running the identical 0.5/0.5-weighted comparison on every other trained categor
 | Tile | 0.973 / 0.92 | 1.000 / 1.00 | 0.992 / 0.94 |
 | Transistor | 0.995 / 0.97 | 1.000 / 1.00 | 1.000 / 1.00 |
 
-All nine categories now have local `baseline_resnet18` + `patchcore_resnet18` checkpoints; `transistor`'s were (re)trained locally to fill in this comparison (val split: 70 train / 30 val images from `make_train_val_split`).
+All nine categories in this comparison have local `baseline_resnet18` + `patchcore_resnet18` checkpoints; `transistor`'s were (re)trained locally to fill in this comparison (val split: 70 train / 30 val images from `make_train_val_split`).
 
 **Finding — the screw "ensemble just ties, can't add value" result does *not* generalize; it was specific to screw's classifier already sitting at a perfect-AUROC ceiling.** Screw, hazelnut, leather, wood, and transistor all have *both* individual signals already at or near 1.0 AUROC on their held-out subset, so there's genuinely no room for the ensemble to improve on either — it correctly just matches the best individual signal in all five cases (transistor's classifier is fractionally below 1.0 at 0.995, but PatchCore is already at the 1.0 ceiling, so the fused score can only match that ceiling too). But bottle, carpet, and grid are exactly the categories where neither individual signal was already perfect (classifier AUROC 0.947/0.992/0.870, PatchCore 0.974/0.947/0.880) — and there the fused ensemble **clearly beats both individual signals**: bottle 0.947→0.982, carpet 0.992→**1.000** (also reaching 1.00 accuracy, up from 0.97), and grid improves the most, 0.870→**0.954** AUROC and 0.833→**0.958** accuracy. This is the ensemble behaving exactly as intended: each signal makes different mistakes, so averaging them cancels out some of each other's errors. Tile is the one exception where the ensemble is a net negative (AUROC 0.992, accuracy 0.944) purely because PatchCore alone was already perfect (1.000/1.00) on tile and blending in the comparatively weaker classifier signal (0.973 AUROC) pulls the fused score down slightly. **Lesson:** whether an ensemble helps depends entirely on whether either component signal already has headroom left to fill — check both individual AUROCs before assuming fusion will help (bottle/carpet/grid) or won't (screw/hazelnut/leather/wood/tile/transistor); don't generalize a single category's ensemble result to the whole pipeline.
 
 ## Generalization to Other Categories
 
-The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was run end-to-end on eight more MVTec-AD categories, picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), `carpet` (a close-up textile texture filling the whole frame, no discrete object at all), `leather` (another close-up, full-frame texture, same situation as carpet), `wood` (wood grain texture surface), `grid` (regular geometric grid pattern), `tile` (repeating tile texture), and `transistor` (a small discrete object like `screw`/`hazelnut`, but sitting on a busy, non-uniform perforated circuit-board background instead of a plain one).
+The same pipeline (manifest → baseline classifier → PatchCore → Streamlit demo) was first run end-to-end on eight more MVTec-AD categories, bringing the original comparison to nine. Those categories were picked to be different in shape: `bottle` (top-down shot of a bottle mouth), `hazelnut` (small object on a plain background, closer to `screw`), `carpet` (a close-up textile texture filling the whole frame, no discrete object at all), `leather` (another close-up, full-frame texture, same situation as carpet), `wood` (wood grain texture surface), `grid` (regular geometric grid pattern), `tile` (repeating tile texture), and `transistor` (a small discrete object like `screw`/`hazelnut`, but sitting on a busy, non-uniform perforated circuit-board background instead of a plain one). The table below was later extended with PatchCore results for the six additional categories.
 
 These PatchCore numbers use normal-only threshold calibration (see [Threshold Calibration](#threshold-calibration-normal-only-vs-labelled) below): each category's `train/good` is split 80/20 into a memory-bank fitting subset and a held-out calibration subset, image/pixel thresholds are the 95th percentile of the calibration subset's scores, and the frozen model + thresholds are scored once on the full, untouched 100-image MVTec test set. Because the memory bank now sees only ~80% of `train/good`, image/pixel ROC-AUC (threshold-free, computed on the full test set) shift slightly from a pre-calibration run; IoU/Dice drop more, because they were previously computed at a Youden's-J pixel threshold *tuned on the same test set they were scored on* — see the Lessons Learned entry below for why that inflated the old numbers.
 
@@ -907,7 +917,20 @@ These PatchCore numbers use normal-only threshold calibration (see [Threshold Ca
 
 **Transistor localization postprocessing.** Because the busy board creates disconnected false positives and weak bridges into border responses, `keep_primary_region: true` with `primary_region_peak_fraction: 0.30` grows the displayed region from the map's strongest response at a boundary 30% of the way from the calibrated pixel threshold to that image's peak. This postprocessor drives localization, severity, and optional defect crops; the raw PatchCore scores still define image AUROC (`0.9975`) and pixel AUROC (`0.9608`). On the full defective test set, increasing the fraction from `0.10` to `0.30` improves mean IoU from `0.3116` to `0.3210` and mean Dice from `0.4461` to `0.4628`. On `bent_lead/001.png`, the broad board response shrinks from `6,807` to `2,181` predicted pixels, raising IoU/Dice from `0.0172`/`0.0338` to `0.0536`/`0.1018` while retaining all ground-truth defect pixels. The tighter boundary lowers mean defect-pixel recall from `85.5%` to `67.1%`, especially for `cut_lead` and `misplaced`, so this is a precision-oriented display tradeoff rather than a pixel-exact segmentation claim. (These specific numbers are from the pre-calibration memory bank fit on all 213 `train/good` images; the `primary_region_peak_fraction` sweep itself was not re-run after adding normal-only calibration, so its absolute AUROC/IoU/Dice values are slightly stale — see [Threshold Calibration](#threshold-calibration-normal-only-vs-labelled) below for the current numbers.)
 
-The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a ResNet18 classifier to recognize the object type, and the app routes the upload to that category's PatchCore detector automatically. A collapsed "override" dropdown provides a manual fallback. Adding a category requires a `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` and retraining the category classifier with it included. A combined run across all 15 MVTec-AD categories (`--categories` default: screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper — the last six have manifests but not yet a full baseline/PatchCore config) reached **100% validation accuracy** (5354 images total, 3629 train / 1725 val, perfect confusion matrix across every class), confirming the "which object type is this?" task stays trivially separable even as the label set nearly doubles.
+**Completing all fifteen categories — `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, `zipper`.** PatchCore memory banks (`models/checkpoints/patchcore_resnet18_<category>_memory_bank.pt`) were built for the six remaining MVTec-AD categories with the same default recipe as the other categories (ResNet18 layer2+3, 2,000-patch coreset, 80/20 normal-only calibration, 95th-percentile thresholds, one scoring of the full test set; no per-category tuning). `use_foreground_mask` was decided up front, label-free, by inspecting Otsu masks on `train/good` images: only `pill` (plain white background, clean hole-free mask) enables it; `cable` (ragged mask dropping dark insulation), `capsule` (the black half of the capsule is classified as background), `metal_nut` (holes inside the shiny object), `toothbrush` (holes at the bristle tufts where defects occur) and `zipper` (full-frame texture) keep it off. No good/defective classifier baseline or autoencoder was trained for these six. Defect-type classification results are included below where the category has multiple defect labels.
+
+| Category | Accuracy | Precision | Recall | F1 | Image ROC-AUC | Pixel ROC-AUC | Missed defects / false alarms |
+|---|---|---|---|---|---|---|---|
+| Cable | 0.907 | 0.915 | 0.935 | 0.925 | 0.988 | 0.981 | 6/92 · 8/58 |
+| Capsule | 0.848 | 0.968 | 0.844 | 0.902 | 0.935 | 0.983 | 17/109 · 3/23 |
+| Metal nut | 0.965 | 0.978 | 0.978 | 0.978 | 0.991 | 0.979 | 2/93 · 2/22 |
+| Pill | 0.743 | 0.990 | 0.702 | 0.822 | 0.901 | 0.958 | 42/141 · 1/26 |
+| Toothbrush | 0.905 | 0.933 | 0.933 | 0.933 | 0.956 | 0.989 | 2/30 · 2/12 |
+| Zipper | 0.967 | 0.975 | 0.983 | 0.979 | 0.963 | 0.985 | 2/119 · 3/32 |
+
+**Finding — `pill` is the weakest of the new categories, and its calibrated threshold is too strict.** Image AUROC is only 0.901 and, even though precision is 0.990, the 95th-percentile threshold from 53 held-out normals misses 42 of 141 defective images (recall 0.702), the opposite failure of transistor's false-alarm-heavy threshold. Capsule shows the same pattern in milder form (recall 0.844, image AUROC 0.935), and has the lowest mean IoU (0.049) despite a high pixel AUROC (0.983), because its defects are tiny. Pixel AUROC is ≥ 0.958 for all six, i.e. the heatmaps rank defect pixels well even where the image-level threshold/score is weak. Pill was run only with the foreground mask on (decided before seeing results); whether disabling it would help was **not** tested, since choosing between the two on the test set would reintroduce test-set tuning. **Demo routing:** the category classifier (already a 15-way model, 100% validation accuracy) was routing these images correctly, but the inspection pipeline's routing table ([src/inference/inspection_pipeline.py](src/inference/inspection_pipeline.py)) only listed nine categories, so uploads detected as one of the six failed with "Unsupported category". The six are now registered, and a smoke test on one good and one defective test image per category detected the right category at 100% confidence and ran PatchCore inspection (the demo shows the "no defect-type classifier trained yet" note for them, since only PatchCore was built). [tests/test_inspection_routing.py](tests/test_inspection_routing.py) checks that every routable category has a config and that every category the classifier can predict is routable.
+
+The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a ResNet18 classifier to recognize the object type, and the app routes the upload to that category's PatchCore detector automatically. A collapsed "override" dropdown provides a manual fallback. Adding a category requires a `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` and retraining the category classifier with it included. A combined run across all 15 MVTec-AD categories (`--categories` default: screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) reached **100% validation accuracy** (5354 images total, 3629 train / 1725 val, perfect confusion matrix across every class), confirming the "which object type is this?" task stays trivially separable even as the label set nearly doubles.
 
 ## Threshold Calibration (Normal-only vs. Labelled)
 
@@ -918,7 +941,7 @@ Best practice is to keep three things separate: (1) fitting the PatchCore memory
 | **Normal-only calibration** (used here) | A subset of `train/good` | Held-out normal `train/good` images, at a target false-alarm percentile | All of MVTec's original `test/` images |
 | Labelled calibration | All of `train/good` | A reserved subset with both normal *and* defective images | Remaining, untouched test images |
 
-This repo uses **normal-only calibration** by default (`anomaly_detection.calibration.enabled: true`, set on all nine canonical category configs), because it keeps the original MVTec `test/` split intact for every category — important for comparing categories against each other and against every other table in this README. [src/models/run_anomaly_detection.py](src/models/run_anomaly_detection.py):
+This repo uses **normal-only calibration** by default (`anomaly_detection.calibration.enabled: true`, set on all 15 standard category configs), because it keeps the original MVTec `test/` split intact for every category — important for comparing categories against each other and against every other table in this README. [src/models/run_anomaly_detection.py](src/models/run_anomaly_detection.py):
 
 1. Splits `train/good` into a fitting subset (`calibration.holdout_ratio`, default 80%) and a held-out calibration subset (default 20%) using a seeded, deterministic shuffle (`split_calibration_rows`).
 2. Builds the memory bank from the fitting subset only.
@@ -930,7 +953,7 @@ The fitting/calibration image paths and both frozen thresholds are saved to `out
 
 **Limitation, illustrated with transistor:** with only 43 held-out normal images (170/43 split of transistor's 213 `train/good`), the 95th-percentile image threshold (2.011) is a coarse estimate of a 5% false-alarm rate — on the full 100-image test set it actually produced 11 false positives out of 60 good images (~18% FPR), not 5%. This is expected and matches the stated tradeoff: normal-only calibration controls false alarms only approximately and cannot directly optimize defect recall or F1, because it never sees a single labelled defect. If F1/IoU optimization matters more than keeping the exact MVTec test split, use labelled calibration instead (reserve some defective test images with masks for threshold selection, exclude them from the final evaluation, and report the custom split explicitly) — not currently implemented in this repo.
 
-**Known follow-up:** this rework covers the nine canonical `patchcore_resnet18_<category>` runs. [run_ensemble.py](src/models/run_ensemble.py) and [train_kernel_classifiers.py](src/models/train_kernel_classifiers.py) still pick their own thresholds via `youden_threshold` on their evaluation split, and the architecture/hyperparameter-tuning configs (`screw_config_wide_resnet50_2.yaml`, `screw_config_pca_projection.yaml`, `transistor_config_highres_patchcore.yaml`, etc.) still default to the legacy Youden-on-test threshold — calibrating those too is future work, not done as part of this change.
+**Known follow-up:** this rework covers the 15 canonical `patchcore_resnet18_<category>` runs. [run_ensemble.py](src/models/run_ensemble.py) and [train_kernel_classifiers.py](src/models/train_kernel_classifiers.py) still pick their own thresholds via `youden_threshold` on their evaluation split, and the architecture/hyperparameter-tuning configs (`screw_config_wide_resnet50_2.yaml`, `screw_config_pca_projection.yaml`, `transistor_config_highres_patchcore.yaml`, etc.) still default to the legacy Youden-on-test threshold — calibrating those too is future work, not done as part of this change.
 
 
 ## Defect-Type Classification (per category)
@@ -950,18 +973,22 @@ Beyond the binary Normal/Defective verdict, [src/models/train_defect_classifier.
 | Tile | crack, glue_strip, gray_stroke, oil, rough (5) | 59 / 25 | **0.923** |
 | Wood | color, combined, hole, liquid, scratch (5) | 42 / 18 | 0.667 |
 | Transistor | bent_lead, cut_lead, damaged_case, misplaced (4) | 32 / 8\* | 0.750\* |
+| Cable | bent_wire, cable_swap, combined, cut_inner_insulation, cut_outer_insulation, missing_cable, missing_wire, poke_insulation (8) | 64 / 28 | 0.714 |
+| Capsule | crack, faulty_imprint, poke, scratch, squeeze (5) | 76 / 33 | 0.576 |
+| Metal nut | bent, color, flip, scratch (4) | 65 / 28 | **0.964** |
+| Pill | color, combined, contamination, crack, faulty_imprint, pill_type, scratch (7) | 98 / 43 | 0.558 |
+| Toothbrush | N/A — only the generic `defective` label is present; no defect subtypes | 21 / 9 | N/A |
+| Zipper | broken_teeth, combined, fabric_border, fabric_interior, rough, split_teeth, squeezed_teeth (7) | 83 / 36 | 0.472 |
 
 \* Transistor only has 10 images/defect type (40 total) — too few for a plain train/val split to give a trustworthy number (see lesson below), so it instead uses a nested design: 2 images/class (8 total) reserved as an untouched final test set, 4-fold stratified CV on the remaining 32 (24 train/8 val per fold, 6/2 per class) to pick settings, then one final fit on all 32 dev images evaluated exactly once on the 8-image holdout. "0.750" here is **6/8 correct** on that holdout, not a train/val split accuracy like the other rows.
 
-**Finding — fine-grained defect-type accuracy tracks per-class sample count, not just class count.** Screw and leather both have 5 defect types, yet screw's val accuracy (0.444) is far worse while leather's (0.964) is among the best. Screw's confusion matrix shows `thread_side` and `thread_top` absorbing most misclassifications — with only 83 train images spread over 5 classes (~16–17 images/class), and screw's defect types being subtle, visually-similar deviations on the same small grey object (a scratch on the head vs. the neck, thread wear on one side vs. the top), there's neither enough data nor enough visual separation for reliable distinction. Leather's defect types, by contrast, are visually distinct surface phenomena (a color blotch vs. a cut vs. a glue smear) despite a similarly small dataset (64 train images), so it reaches near-perfect accuracy.
+**Finding — results vary widely across the 15-category dataset, and category count alone does not explain accuracy.** Fourteen categories have multiple defect labels and valid subtype-classification results; `toothbrush` has only a generic `defective` label, so the dataset cannot support fine-grained toothbrush classification. Across the valid categories, the configured ResNet18 validation accuracy ranges from **0.222 on grid** to **0.964 on both leather and metal nut**. Class count is not a reliable predictor: metal nut reaches 0.964 with four classes, while capsule reaches 0.576 with five; pill and zipper reach 0.558 and 0.472 with seven classes, and cable reaches 0.714 across eight. Sample quantity matters but is not sufficient either: the 64-image leather training split scores 0.964, while cable's 64-image split scores 0.714. The visual distinctiveness of each category's labels and the training recipe also matter. Screw (0.444) and grid (0.222) were weak under the canonical recipe, while the [augmentation benchmark](#matched-augmentation-and-architecture-benchmark) later reached 0.944 and 1.000 respectively with ConvNeXt-Tiny and fixed augmentation — evidence that a low single-recipe score is not proof that defect types are inherently indistinguishable.
 
-**Scaling to eight categories — grid, tile, and wood.** Adding three more defect-type classifiers reveals the wide variance in fine-grained accuracy even within a balanced 5-defect-type setup. **Grid** performs poorly (0.222 accuracy) — its defect types (bent, broken, glue, metal_contamination, thread) are subtle spatial/material variations on a regular geometric grid pattern, making them inherently confusable (the confusion matrix shows glue absorbing predictions from all other classes). **Tile** achieves excellent performance (0.923 accuracy, the second-best across all eight categories) — its defect types (crack, glue_strip, gray_stroke, oil, rough) are visually distinct surface phenomena (structural damage vs. surface contamination/discoloration), providing clear visual separation despite similar dataset size to grid. **Wood** reaches a middle ground (0.667 accuracy) — its defect types (color, combined, hole, liquid, scratch) include some visually distinct types (hole vs. scratch) but combined defects and color blotches are harder to disentangle from natural wood grain variation.
-
-**Lesson:** unlike the good/defective and category classifiers, a fine-grained defect-type classifier's accuracy depends heavily on how visually distinguishable that category's specific defect types are from each other, not just on how many classes or how many total images there are. Screw (0.444) and grid (0.222) were the weakest under the original ResNet18 recipe (the [augmentation benchmark](#matched-augmentation-and-architecture-benchmark) below shows ConvNeXt-Tiny with fixed augmentation reaches 0.944 and 1.000 on them, so part of that gap came from training recipe and backbone rather than inherently overlapping defect types); leather (0.964) and tile (0.923) succeed because their defect types are visually distinct phenomena. The task is fundamentally harder than object-category detection (100% accuracy across all eight categories) or binary good/defective classification (both are coarser-grained decisions with better natural class separation).
+**Lesson:** evaluate each category on its own merits and report its split and per-class support; neither a high category-classification score nor a strong result on one object's defect labels establishes reliable fine-grained classification on another. These are small, single-split validations drawn from MVTec's labelled `test/` images, not independent deployment estimates. For `toothbrush`, a trial with its single `defective` label returned 1.000 accuracy for both classifiers, but that is a degenerate one-class result, not defect-type recognition; the artifacts were removed and the training code now rejects categories with fewer than two defect types.
 
 ### Machine Learning Alternatives: PCA + LDA Defect-Type classifier
 
-[src/models/train_pca_lda_defect_classifier.py](src/models/train_pca_lda_defect_classifier.py) targets the same defective-only task and seeded stratified 70/30 splits across all nine categories. It replaces CNN fine-tuning with frozen ImageNet-pretrained ResNet18 embeddings (512-d) → `StandardScaler` → PCA (up to 30 components) → Linear Discriminant Analysis. The PCA dimensions are capped by the available training rows, so transistor uses 27 components. Each fitted pipeline is saved as `models/checkpoints/defect_classifier_pca_lda_<category>.joblib`, with per-category accuracy, confusion matrix, PCA size and explained variance in `outputs/metrics/defect_classifier_pca_lda_<category>_metrics.json`.
+[src/models/train_pca_lda_defect_classifier.py](src/models/train_pca_lda_defect_classifier.py) targets the same defective-only task on a seeded stratified 70/30 split. It replaces CNN fine-tuning with frozen ImageNet-pretrained ResNet18 embeddings (512-d) → `StandardScaler` → PCA (up to 30 components) → Linear Discriminant Analysis. The PCA dimensions are capped by the available training rows, so transistor uses 27 components. Each fitted pipeline is saved as `models/checkpoints/defect_classifier_pca_lda_<category>.joblib`, with per-category accuracy, confusion matrix, PCA size and explained variance in `outputs/metrics/defect_classifier_pca_lda_<category>_metrics.json`.
 
 ```bash
 python -m src.models.train_pca_lda_defect_classifier --config config/screw_config.yaml
@@ -978,38 +1005,51 @@ python -m src.models.train_pca_lda_defect_classifier --config config/screw_confi
 | Grid | **0.222** | 0.167 | 39 / 18 | 30 (0.976) |
 | Tile | **0.923** | 0.885 | 58 / 26 | 30 (0.913) |
 | Transistor | **0.750*** | 0.333 | 28 / 12 | 27 (1.000) |
+| Cable | 0.714 | 0.607 | 64 / 28 | 30 (0.845) |
+| Capsule | 0.576 | 0.394 | 76 / 33 | 30 (0.905) |
+| Metal nut | **0.964** | 0.821 | 65 / 28 | 30 (0.876) |
+| Pill | **0.558** | 0.395 | 98 / 43 | 30 (0.814) |
+| Toothbrush | — | — | 21 / 9 | — |
+| Zipper | **0.472** | 0.333 | 83 / 36 | 30 (0.850) |
 
 ¹ ResNet18 accuracy is copied from [Defect-Type Classification (per category)](#defect-type-classification-per-category), not recomputed. Transistor's 0.750 is 6/8 on the reserved 80/20 holdout after nested CV because it has only 10 images per defect type. ² PCA+LDA uses the config's seeded 70/30 split; its transistor value is on a separate 12-image validation split and is not directly comparable to the 8-image ResNet18 holdout. PCA train/validation counts are shown; the standard 70/30 split also differs from the historical ResNet18 split by one image for grid and tile.
 
-**Finding — PCA+LDA beats the canonical ResNet18 result on three categories, but is not a general improvement.** It raises accuracy on screw (0.444 → 0.528), bottle (0.789 → 0.842), and wood (0.667 → 0.833). It is lower on hazelnut, carpet, leather, grid, and tile; transistor's figures use different evaluation splits, so that row is descriptive rather than a paired comparison. The apparent bottle gain depended on comparing against an older ResNet18 result, but it remains against the canonical score; wood is a newly measured gain. PCA+LDA is worth retaining as a classical, category-specific baseline, while the available evidence does not support it as the default classifier. These are small, test-derived validation sets; confirm category-specific choices with matched repeated or nested cross-validation before deployment.
+Toothbrush has only one test defect folder, `defective`, so the dataset provides no fine-grained defect subtypes to classify. A one-class trial returned 1.000 accuracy for both models, but that result is degenerate and is excluded; the generated model artifacts were removed.
+
+**Finding — across the 13 categories with directly comparable splits, the configured ResNet18 is higher on 10 and PCA+LDA on 3.** PCA+LDA scores higher on screw (0.528 vs. 0.444), bottle (0.842 vs. 0.789), and wood (0.833 vs. 0.667). ResNet18 scores higher on hazelnut, carpet, leather, grid, tile, cable, capsule, metal nut, pill, and zipper. The newly added categories therefore reinforce that PCA+LDA is a useful classical alternative, but not a consistent replacement for the CNN. These are single seeded runs on small, test-derived validation subsets, not independent deployment estimates; compare methods with matched repeated or nested cross-validation before choosing a category-specific model. Toothbrush is excluded because its only defect label is `defective`, and transistor's CNN and PCA+LDA scores use different validation splits, so neither is included in the 10-to-3 count.
+
+**Lesson — retained variance is not the same as class separation.** For the five new categories, PCA+LDA retains 0.814–0.905 of the embedding variance; across the full comparison, grid retains 0.976 yet reaches only 0.167 validation accuracy. Preserving most embedding variance does not guarantee that the retained directions distinguish defect types. Keep PCA+LDA as a low-data classical baseline and assess it by held-out classification performance, not explained variance alone.
 
 
 ### Data Augmentation and Architecture Benchmark
 
-**Script:** [src/models/benchmark_defect_classifiers.py](src/models/benchmark_defect_classifiers.py). One seeded stratified 70/30 split per category is reused for every run (469 train / 205 validation images in total). Each category gets five trainings: ResNet18 without augmentation (the before-augmentation baseline), then ResNet18, ConvNeXt-Tiny, EfficientNet-B0, and DenseNet121 on augmented training data.
+**Script:** [src/models/benchmark_defect_classifiers.py](src/models/benchmark_defect_classifiers.py). One seeded stratified 70/30 split per category is reused for every run. Each category with subtype labels gets five trainings: ResNet18 without augmentation (the before-augmentation baseline), then ResNet18, ConvNeXt-Tiny, EfficientNet-B0, and DenseNet121 on augmented training data. The consolidated table covers all 15 MVTec categories; Toothbrush remains N/A because it has no fine-grained subtype labels.
 
 **Augmentation is deterministic and training-only.** Instead of random transforms, each training image is expanded into a fixed set of variants (generated on the fly from the original file; nothing is written to disk). The defect-type label is unchanged, validation images are never augmented, and images are resized to a square first so quarter turns neither crop nor pad. This is to ensure images are consistent with MVTech AD data capture settings. The rules live in `get_defect_augmentation_variants` ([src/preprocessing/transform.py](src/preprocessing/transform.py)):
 
+The full flip-and-quarter-turn is set for almost all labeled defect type categories except for transistor and toothbrush. Transistor only allows for horizontal flip as there is a defect type category that accounts for any misaligned rotation of transistors as misplaced. Hence the only data augmentation permitted to boost predictive performance for transistor is on defect type `misplaced`. Toothbrush is excluded because its manifest has only a generic `defective` label, not defect subtypes.
+
 | Categories | Variants per training image |
 |---|---|
-| screw, bottle, hazelnut, carpet, leather, grid, tile | original, horizontal flip, vertical flip, 90°, 180°, 270° rotation (6) |
-| wood | original, horizontal flip, vertical flip (3) |
+| screw, bottle, hazelnut, carpet, leather, wood, grid, tile, cable, capsule, metal nut, pill, zipper | original, horizontal flip, vertical flip, 90°, 180°, 270° rotation (6) |
 | transistor, `misplaced` | original, horizontal flip, vertical flip, 180° rotation (4) |
 | transistor, other defect types | original, horizontal flip (2) |
 
-A combined horizontal+vertical flip is deliberately omitted because it is pixel-identical to a 180° rotation. `get_train_transforms()` (used by the good/defective and category classifiers) also no longer applies `RandomRotation(10)`. Training images grow from 469 to 2,590 (screw 83→498, bottle 44→264, hazelnut 49→294, carpet 62→372, leather 64→384, wood 42→126, grid 39→234, tile 58→348, transistor 28→70).
+A combined horizontal+vertical flip is deliberately omitted because it is pixel-identical to a 180° rotation. `get_train_transforms()` (used by the good/defective and category classifiers) also no longer applies `RandomRotation(10)`. The labeled-category training manifests use the same deterministic variants for all categories except the documented transistor-specific rule; Toothbrush is not included in defect-type training.
 
 All models use ImageNet-pretrained weights and each category's config for learning rate (1e-4), a 10-epoch cap, and early stopping (patience 3 on validation loss). Reported validation metrics use the restored best-validation-loss weights; final train loss is the last completed epoch's loss. Macro-F1 is reported to account for per-class performance. Values below are `accuracy / macro-F1 / final train loss`.
 
 **Compute caveat:** an augmented run sees 2–6× more samples (and weight updates) per epoch than the baseline, so the before/after gain bundles augmentation with more updates; a fixed-update-budget control was not run.
 
-**Streamlit deployment run:** the selected ConvNeXt-Tiny model was retrained on all nine categories with the same deterministic variants (no baseline, other architectures, or ensemble). Reproduce it with:
+**Streamlit deployment run:** the selected ConvNeXt-Tiny model was retrained on the labeled categories with the same deterministic variants. The later ensemble deployment is documented in [Ensemble model comparisons and tracking](#ensemble-model-comparisons-and-tracking).
 
 ```powershell
 python -u -m src.models.benchmark_defect_classifiers --architectures convnext_tiny --skip-baseline --save-deployment-checkpoints --output-prefix convnext_tiny_deployment --torch-threads 8
 ```
 
-The runner writes each best-validation-loss model to `models/checkpoints/defect_classifier_convnext_tiny_<category>.pt` and a matching `outputs/metrics/defect_classifier_convnext_tiny_<category>_metrics.json` containing the ordered `defect_types` and `crop_mode` required by the Streamlit loader. Category configs select ConvNeXt-Tiny for the defect classifier only; the separate category and binary classifiers remain configured independently. The run log includes a flushed category/model progress line and elapsed time. The completed CPU run took 1:16:43, and all nine checkpoints loaded successfully through `InspectionPipeline`.
+The runner writes each best-validation-loss model to `models/checkpoints/defect_classifier_convnext_tiny_<category>.pt` and a matching `outputs/metrics/defect_classifier_convnext_tiny_<category>_metrics.json` containing the ordered `defect_types` and `crop_mode` required by the Streamlit loader. Category configs select the defect classifier independently from the separate category and binary classifiers. The run log includes a flushed category/model progress line and elapsed time.
+
+**Pill baseline reconciliation:** the `0.372` ResNet18 value below is the intentionally matched *no-augmentation* baseline. It uses the same seed-42 stratified 98-train / 43-validation split as the earlier `0.558` result, but the benchmark trains the baseline with deterministic resize/normalize transforms only. The earlier [per-category](#defect-type-classification-per-category) `0.558` run used `train_defect_classifier.py`, whose training loader applies `get_train_transforms()` and therefore random horizontal flips. The validation images are unaugmented in both cases, but the models are trained differently; `0.558` is the canonical random-flip training result, while `0.372` is the controlled before-augmentation baseline required for the architecture comparison. This is a protocol difference, not a validation-split mismatch.
 
 | Category | ResNet18, no augmentation | ResNet18, augmented | ConvNeXt-Tiny, augmented | EfficientNet-B0, augmented | DenseNet121, augmented |
 |---|---:|---:|---:|---:|---:|
@@ -1018,34 +1058,38 @@ The runner writes each best-validation-loss model to `models/checkpoints/defect_
 | Hazelnut | **0.905 / 0.909** / 0.0532 | **0.905** / 0.902 / 0.0068 | **0.905** / 0.902 / 0.0064 | **0.905** / 0.896 / 0.0281 | **0.905** / 0.896 / 0.0149 |
 | Carpet | 0.778 / 0.764 / 0.0087 | 0.889 / 0.883 / 0.0089 | **0.926 / 0.926** / 0.0117 | 0.815 / 0.818 / 0.0715 | 0.815 / 0.814 / 0.0428 |
 | Leather | 0.929 / 0.926 / 0.0072 | **1.000 / 1.000** / 0.0196 | **1.000 / 1.000** / 0.0019 | **1.000 / 1.000** / 0.0402 | **1.000 / 1.000** / 0.0183 |
-| Wood | 0.667 / 0.646 / 0.0106 | 0.778 / 0.729 / 0.0085 | 0.833 / 0.794 / 0.0156 | 0.722 / 0.687 / 0.2270 | **0.889 / 0.867** / 0.0223 |
 | Grid | 0.222 / 0.163 / 0.3959 | 0.278 / 0.210 / 0.1536 | **1.000 / 1.000** / 0.0052 | 0.444 / 0.420 / 0.4897 | 0.667 / 0.660 / 0.0475 |
 | Tile | 0.923 / 0.920 / 0.0131 | 0.962 / 0.960 / 0.0054 | **1.000 / 1.000** / 0.0008 | **1.000 / 1.000** / 0.0195 | **1.000 / 1.000** / 0.0115 |
 | Transistor | 0.667 / 0.667 / 0.0048 | 0.667 / 0.638 / 0.0255 | **0.917 / 0.914** / 0.0102 | **0.917 / 0.914** / 0.2461 | 0.750 / 0.731 / 0.0230 |
+| Wood | 0.667 / 0.646 / 0.0106 | 0.778 / 0.655 / 0.0171 | **0.889 / 0.867** / 0.0136 | **0.889 / 0.870** / 0.0917 | **0.889 / 0.867** / 0.0300 |
+| Cable | 0.714 / 0.656 / 0.0153 | 0.857 / 0.837 / 0.0091 | 0.821 / 0.780 / 0.0078 | **0.893 / 0.877** / 0.0477 | **0.893 / 0.874** / 0.0156 |
+| Capsule | 0.485 / 0.520 / 0.0069 | 0.485 / 0.505 / 0.0812 | **0.758 / 0.756** / 0.0434 | 0.636 / 0.643 / 0.1188 | 0.727 / 0.696 / 0.0271 |
+| Metal nut | 0.857 / 0.854 / 0.0370 | 0.893 / 0.892 / 0.0097 | **1.000 / 1.000** / 0.0009 | **1.000 / 1.000** / 0.0386 | **1.000 / 1.000** / 0.0185 |
+| Pill | 0.372 / 0.427 / 0.0684 | 0.605 / 0.621 / 0.0279 | 0.674 / 0.695 / 0.0135 | 0.628 / 0.642 / 0.0607 | **0.767 / 0.784** / 0.0333 |
+| Toothbrush | N/A | N/A | N/A | N/A | N/A |
+| Zipper | 0.611 / 0.608 / 0.0481 | 0.750 / 0.754 / 0.0766 | **0.889 / 0.877** / 0.0192 | 0.806 / 0.804 / 0.1101 | 0.750 / 0.733 / 0.0823 |
 
-Bold marks the best accuracy / macro-F1 in each row (ties are all bold). Architecture means give each category equal weight; standard deviations are across the nine categories.
+Bold marks the best accuracy / macro-F1 in each row (ties are all bold). Architecture means give each category with valid subtype labels equal weight; standard deviations are across 14 scored categories. Toothbrush is retained as N/A.
 
 | Architecture / training | Mean validation accuracy ± SD | Mean macro-F1 ± SD | Mean final train loss | Parameters (ImageNet head) |
 |---|---:|---:|---:|---:|
-| ResNet18, no augmentation | 0.687 ± 0.290 | 0.672 ± 0.308 | 0.0770 | 11.7M |
-| ResNet18, augmented | 0.791 ± 0.220 | 0.767 ± 0.242 | 0.0361 | 11.7M |
-| **ConvNeXt-Tiny, augmented** | **0.930 ± 0.064** | **0.925 ± 0.072** | **0.0120** | 28.6M |
-| EfficientNet-B0, augmented | 0.809 ± 0.182 | 0.801 ± 0.191 | 0.1421 | 5.3M |
-| DenseNet121, augmented | 0.871 ± 0.110 | 0.864 ± 0.114 | 0.0246 | 8.0M |
+| ResNet18, no augmentation | 0.659 ± 0.245 | 0.651 ± 0.250 | 0.0621 | 11.7M |
+| ResNet18, augmented | 0.765 ± 0.193 | 0.746 ± 0.204 | 0.0384 | 11.7M |
+| **ConvNeXt-Tiny, augmented** | **0.897 ± 0.094** | **0.893 ± 0.094** | **0.0136** | 28.6M |
+| EfficientNet-B0, augmented | 0.815 ± 0.162 | 0.811 ± 0.164 | 0.1086 | 5.3M |
+| DenseNet121, augmented | 0.855 ± 0.106 | 0.847 ± 0.110 | 0.0290 | 8.0M |
 
-**Augmentation effect (ResNet18, same split):** mean accuracy rose from 0.687 to 0.791 (+10.5 points) and macro-F1 from 0.672 to 0.767 (+9.5 points). No category's accuracy fell; the largest gain was screw (0.194 → 0.750), while bottle, hazelnut, and transistor were unchanged in accuracy and slightly lower in macro-F1. An earlier run with random flips and random quarter turns gave ResNet18 0.727 / 0.697 on the same splits, so fixed variants did better, though that comparison also carries run-to-run noise.
+**Augmentation effect (ResNet18, same split):** across the 14 scored categories, mean accuracy rose from 0.659 to 0.765 (+10.7 points) and macro-F1 from 0.651 to 0.746 (+9.5 points). Accuracy improved in 12 categories, was unchanged for Bottle, and fell for Capsule; macro-F1 fell for Bottle, Hazelnut, and Capsule. The largest gains were Screw (0.194 → 0.750) and Pill (0.372 → 0.605). These before/after differences bundle geometric augmentation with more optimizer updates per epoch; this was not a fixed-update-budget experiment.
 
-**Architecture comparison:** ConvNeXt-Tiny had the highest mean accuracy and macro-F1, the lowest spread across categories (SD 0.064), and the lowest mean final train loss. It was best or tied-best in accuracy in 7 of 9 categories and trailed only in bottle (0.842 vs 0.895) and wood (0.833 vs DenseNet121's 0.889). Its largest margins were grid (1.000 vs 0.278–0.667 for the others) and screw (0.944 vs 0.639–0.917). DenseNet121 was second (0.871). EfficientNet-B0 had the highest mean final train loss (0.142; wood 0.227, grid 0.490, transistor 0.246), consistent with slower fitting under the 10-epoch cap, and its accuracy tracked that.
+**Architecture comparison:** ConvNeXt-Tiny had the highest 14-category mean accuracy and macro-F1 (0.897 / 0.893), followed by DenseNet121 (0.855 / 0.847). ConvNeXt-Tiny was best or tied-best in most scored categories, while DenseNet121 led Cable and Pill and EfficientNet-B0 led Metal nut and tied Wood. ConvNeXt-Tiny's largest advantages were Grid (1.000 vs. 0.278–0.667 for the other models) and Screw (0.944 vs. 0.639–0.917). EfficientNet-B0 had the highest mean final training loss (0.1086), while DenseNet121 was the smaller model with a close second-place aggregate.
 
-**Recommendation:** settle on ConvNeXt-Tiny with the deterministic augmentation for defect-type classification; DenseNet121 is the smaller (8.0M vs 28.6M parameters) second choice. Treat the ranking as suggestive, not final: each validation set has only 12–36 images, so one image is worth 2.8–8.3 accuracy points, and much of ConvNeXt-Tiny's 5.9-point lead over DenseNet121 comes from grid (6 of 18 images). Rerunning the identical ResNet18 baseline gave hazelnut 0.857 in an earlier run versus 0.905 here (one image of 21), which is the size of run-to-run noise to expect. All images also come from MVTec's labeled `test/` data, so a held-out source, multiple seeds, or nested stratified cross-validation is needed before treating these as deployment estimates; the [ensemble comparisons](#ensemble-model-comparison-and-tracking) below remain exploratory for the same reason.
+**Recommendation:** use ConvNeXt-Tiny with deterministic augmentation as the default across the 15-category table, with DenseNet121 as the smaller (8.0M vs. 28.6M parameters) alternative and per-category selection where validation evidence supports it. Treat the ranking as suggestive: Toothbrush has no valid subtype task, individual validation sets are small, and one image can change accuracy by several points. All images come from MVTec's labeled `test/` data, so a held-out source, multiple seeds, or nested stratified cross-validation is needed before treating these as deployment estimates.
 
 ## Ensemble model comparisons and tracking
 
-**Script:** [src/models/run_defect_classifier_ensembles.py](src/models/run_defect_classifier_ensembles.py). It reuses the saved ConvNeXt-Tiny seed-42 deployment models, trains augmented ResNet18, EfficientNet-B0, and DenseNet121 members with seed 42, then trains three ConvNeXt-Tiny bagging members with seeds 42, 43, and 44. Each bagging member uses a class-stratified bootstrap sample (sampling with replacement within each defect type while preserving its training count). All members use the same seeded stratified train/validation split and the category-specific deterministic augmentation rules above. Alternative model and bagging-member weights are saved separately under `models/checkpoints/ensemble_members/`; the active Streamlit ConvNeXt checkpoints are not overwritten.
+**Script:** [src/models/run_defect_classifier_ensembles.py](src/models/run_defect_classifier_ensembles.py). It reuses the saved ConvNeXt-Tiny seed-42 deployment models, trains augmented ResNet18, EfficientNet-B0, and DenseNet121 members with seed 42, then trains three ConvNeXt-Tiny bagging members with seeds 42, 43, and 44. Each bagging member uses a class-stratified bootstrap sample. All members use the same seeded stratified train/validation split and category-specific deterministic augmentation rules. Alternative weights are saved under `models/checkpoints/ensemble_members/`; the active Streamlit checkpoints are not overwritten.
 
-The comparison excludes stacking and boosting. It evaluates four-model hard voting (ties resolved by mean probability), equal-weight soft voting, a ConvNeXt-heavy 70/10/10/10 soft vote, three-seed ConvNeXt bagging, and a category-routed single model (DenseNet121 for bottle/wood, ConvNeXt-Tiny for the other categories). Bottle and wood additionally compare ConvNeXt:DenseNet soft-vote weights of 25:75, 50:50, and 75:25. Per-category strategy metrics and per-image probabilities are saved to `outputs/metrics/defect_classifier_ensemble_runs.csv`, `outputs/metrics/defect_classifier_ensemble_summary.csv`, and `outputs/metrics/defect_classifier_ensemble_per_image_predictions.csv`. These validation comparisons are exploratory because the held-out rows come from MVTec's labeled `test/` data; weight selection must be confirmed using nested or repeated cross-validation before deployment.
-
-**Ensemble comparison:** values are validation accuracy / macro-F1. All strategies use the same per-category validation images.
+The comparison excludes stacking and boosting. It evaluates four-model hard voting, equal-weight soft voting, a ConvNeXt-heavy 70/10/10/10 soft vote, three-seed ConvNeXt bagging, and the pre-specified category-routed single model. Results below consolidate all 15 MVTec categories; Toothbrush is N/A because it has no defect subtypes, so aggregate statistics use the 14 scored categories. Values are validation accuracy / macro-F1.
 
 | Category | ConvNeXt single | Hard vote (4) | Equal soft vote (4) | ConvNeXt-heavy soft (70/10/10/10) | ConvNeXt bagging (3) | Category-routed single |
 |---|---:|---:|---:|---:|---:|---:|
@@ -1054,26 +1098,31 @@ The comparison excludes stacking and boosting. It evaluates four-model hard voti
 | Hazelnut | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | 0.905 / 0.902 | **0.952 / 0.953** | 0.905 / 0.902 |
 | Carpet | 0.926 / 0.926 | 0.926 / 0.926 | **0.963 / 0.966** | 0.926 / 0.926 | 0.926 / 0.926 | 0.926 / 0.926 |
 | Leather | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** |
-| Wood | 0.833 / 0.794 | 0.889 / 0.867 | 0.833 / 0.808 | 0.833 / 0.794 | **0.944 / 0.931** | 0.889 / 0.867 |
 | Grid | **1.000 / 1.000** | 0.722 / 0.719 | 0.778 / 0.776 | **1.000 / 1.000** | 0.833 / 0.831 | **1.000 / 1.000** |
 | Tile | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** |
 | Transistor | **0.917 / 0.914** | 0.833 / 0.833 | 0.833 / 0.833 | **0.917 / 0.914** | 0.833 / 0.833 | **0.917 / 0.914** |
+| Wood | **0.889 / 0.867** | 0.833 / 0.808 | 0.833 / 0.808 | **0.889 / 0.867** | 0.833 / 0.808 | **0.889 / 0.867** |
+| Cable | 0.821 / 0.780 | 0.857 / 0.798 | 0.857 / 0.798 | 0.821 / 0.780 | 0.857 / 0.798 | 0.821 / 0.780 |
+| Capsule | 0.758 / 0.756 | 0.788 / 0.795 | **0.818 / 0.824** | 0.758 / 0.769 | 0.758 / 0.759 | 0.758 / 0.756 |
+| Metal nut | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | **1.000 / 1.000** | 0.964 / 0.964 | **1.000 / 1.000** |
+| Pill | 0.674 / 0.695 | 0.767 / 0.763 | **0.814 / 0.820** | 0.721 / 0.734 | **0.814 / 0.815** | 0.674 / 0.695 |
+| Toothbrush | N/A | N/A | N/A | N/A | N/A | N/A |
+| Zipper | 0.889 / 0.877 | **0.917 / 0.906** | **0.917 / 0.906** | 0.889 / 0.877 | 0.861 / 0.832 | 0.889 / 0.877 |
 
 | Strategy | Categories | Mean validation accuracy ± SD | Mean macro-F1 ± SD |
 |---|---:|---:|---:|
-| ConvNeXt-Tiny single model | 9 | 0.930 ± 0.064 | 0.925 ± 0.072 |
-| Four-model hard vote | 9 | 0.893 ± 0.087 | 0.889 ± 0.088 |
-| Four-model equal soft vote | 9 | 0.897 ± 0.080 | 0.894 ± 0.084 |
-| ConvNeXt-heavy soft vote (70/10/10/10) | 9 | 0.930 ± 0.064 | 0.925 ± 0.072 |
-| ConvNeXt bagging, 3 stratified-bootstrap seeds | 9 | 0.922 ± 0.061 | 0.920 ± 0.062 |
-| Category-routed single model | 9 | **0.942 ± 0.047** | **0.938 ± 0.051** |
+| ConvNeXt-Tiny single model | 14 scored / 15 total | 0.894 ± 0.095 | 0.888 ± 0.097 |
+| Four-model hard vote | 14 scored / 15 total | 0.879 ± 0.085 | 0.872 ± 0.088 |
+| Four-model equal soft vote | 14 scored / 15 total | **0.891 ± 0.074** | **0.885 ± 0.078** |
+| ConvNeXt-heavy soft vote (70/10/10/10) | 14 scored / 15 total | 0.901 ± 0.087 | **0.897 ± 0.087** |
+| ConvNeXt bagging, 3 stratified-bootstrap seeds | 14 scored / 15 total | 0.889 ± 0.071 | 0.880 ± 0.077 |
+| Category-routed single model | 14 scored / 15 total | **0.901 ± 0.093** | 0.897 ± 0.093 |
 
-**Bottle/wood ConvNeXt:DenseNet vote sweep:** bottle scored 0.895 / 0.892 at 25:75, versus ConvNeXt alone at 0.842 / 0.842; 50:50 and 75:25 both scored 0.842 / 0.842. Wood scored 0.889 / 0.867 at all three ratios, matching DenseNet121 alone (0.889 / 0.867) and beating ConvNeXt alone (0.833 / 0.794). The targeted blends did not improve over the best single member.
+**Finding:** across the consolidated 15-category cohort, the category-routed policy and ConvNeXt-heavy soft vote have the highest observed aggregate means, with the routed policy at 0.901 / 0.897 and the heavy vote at 0.901 / 0.897. The ConvNeXt-heavy vote is the selected deployment method because it is a genuine architecture-fusion ensemble without post-hoc per-category routing. No method dominates every category: bagging helps Bottle and Hazelnut but loses on Metal nut and Zipper, while the heavy vote and routed policy are strongest on several established categories but are not uniformly best on the added categories.
 
-**Finding:** ordinary voting did not improve over ConvNeXt-Tiny. The 70%-ConvNeXt vote preserved exactly the same category decisions as ConvNeXt alone; equal and hard voting reduced mean accuracy by 3.3 and 3.7 points, respectively. Three-seed bagging averaged 0.922 / 0.920, slightly below the single model (0.930 / 0.925); it helped bottle, hazelnut, and wood but lost 16.7 accuracy points on grid. The category-routed policy has the highest observed mean, but DenseNet was assigned to bottle and wood after inspecting these same validation outcomes. That is post-hoc model selection, not an unbiased ensemble result. Treat routing as a candidate to test inside nested cross-validation, not as a confirmed deployment gain.
+**Deployment:** the measured four-member ConvNeXt-heavy soft-voting strategy (70% ConvNeXt-Tiny, 10% each ResNet18, EfficientNet-B0, and DenseNet121) is configured in Streamlit for Cable, Capsule, Metal nut, Pill, Zipper, and Wood. Each member predicts probabilities and the app applies the measured weights before producing the defect-type label and confidence; Toothbrush remains unconfigured/N/A. This is a real four-model soft-voting inference path, not a relabeled single-model route.
 
-The run took 6:36:36 on CPU. It saved 54 additional member checkpoints and metadata files under `models/checkpoints/ensemble_members/` and `outputs/metrics/ensemble_members/`. The shared prediction CSV supports error-by-image review; the progress log records category, member, sampling method, and elapsed time. These results share the same small MVTec `test/`-derived validation splits as the architecture benchmark, so they are useful for screening methods, not final model selection.
-
+The original nine-category runs took 6:36:36 on CPU; the added Cable, Capsule, Metal nut, Pill, Zipper, and Wood runs took 08:29:30 in total. These results share the same small MVTec `test/`-derived validation splits as the architecture benchmark, and method selection remains exploratory. Confirm the ranking with repeated/nested stratified cross-validation or a genuinely independent test source before treating these metrics as deployment estimates. Wood has only 18 validation images, so one image changes accuracy by about 5.6 points.
 ### Defect-focused crop ablation
 
 [src/preprocessing/defect_crop.py](src/preprocessing/defect_crop.py) converts a binary localization mask into a padded square crop. Training can use either MVTec ground-truth masks (`--crop-source ground-truth`) or the default PatchCore detector's predicted pixel mask (`--crop-source patchcore`). The latter matches deployment: [app/streamlit_app.py](app/streamlit_app.py) thresholds the uploaded image's PatchCore anomaly map, intersects it with the object foreground when enabled, applies the same crop metadata saved with the classifier, then predicts defect type from that crop.
@@ -1111,7 +1160,7 @@ The deployment-matched crop improves screw by **13.89 accuracy points** on the i
 - **An ensemble can't out-perform a classifier that's already at its evaluation ceiling — but it clearly helps once neither component signal is already perfect.** On screw, fusing the supervised classifier with PatchCore's score seemed like an obvious way to get the best of both, but on the classifier's own held-out validation subset the classifier alone already hits AUROC 1.0 (for the same reason its plain validation metrics are inflated — see above), so there's no room left for the ensemble to improve on. Extending the same comparison to all nine trained categories (see [Extending the ensemble comparison to all eight categories](#extending-the-ensemble-comparison-to-all-eight-categories) above) showed this was specific to screw's ceiling, not a general property of ensembling: bottle, carpet, and grid all have both individual signals below 1.0 AUROC, and the fused ensemble clearly beat both there (grid 0.870/0.880 individually → 0.954 fused AUROC; carpet → 1.000; bottle → 0.982). Tile was the one case where fusing *hurt* slightly, because PatchCore alone was already perfect there and blending in the weaker classifier pulled the score down. A fusion technique can only be shown to add value when at least one component signal still has headroom left to fill — check both individual AUROCs per category before assuming ensembling will (or won't) help.
 - **High pixel AUROC does not imply tight defect segmentation.** Mean IoU/Dice came out low (~0.04/0.07) even though pixel AUROC was high. The anomaly map is produced on a coarse 28×28 feature grid and bilinearly upsampled to 224×224, so it's good at *ranking* defect pixels highly (localizing the general region) but blurry compared to MVTec's tight ground-truth masks. Pixel AUROC and IoU/Dice answer different questions and should be reported together, not interchangeably.
 - **Higher spatial resolution can amplify structured-background false positives.** Moving transistor from 224px to 320px while retaining `layer2+layer3` reduced image/pixel AUROC from `0.9975`/`0.9608` to `0.9763`/`0.8759` and mean IoU/Dice from `0.2482`/`0.3507` to `0.1951`/`0.2826`; switching to shallower `layer1+layer2` features reduced them further to `0.9171`/`0.7233` and `0.1608`/`0.2484`. On `cut_lead/001.png`, the shallow model's strongest response moved off the defect and onto the perforated board. Finer localization is not just a resolution choice: shallow features can become more sensitive to repeating background edges than to the defect itself, so high-resolution variants must be validated per category before deployment.
-- **Deterministic flip/quarter-turn augmentation improved defect-type classification, but the gain includes more training updates.** Fixed variants expanded the nine-category training split from 469 originals to 2,590 training rows (2–6× per category). On the matched split, augmented ResNet18 rose from 0.687 / 0.672 mean accuracy / macro-F1 to 0.791 / 0.767; no category's accuracy fell. ConvNeXt-Tiny reached 0.944 on screw (ResNet18 baseline 0.194) and 1.000 on grid (0.222), showing the earlier low scores were not an inherent ceiling. Because each epoch now contains more updates, the augmentation comparison does not isolate transform diversity from optimization budget; validation sets are only 12–36 images. Confirm with repeated seeds or nested cross-validation and a fixed-update control before treating the gains as general.
+- **Deterministic flip/quarter-turn augmentation improved defect-type classification, but the gain includes more training updates.** Across the consolidated 14 scored categories, augmented ResNet18 rose from 0.659 / 0.651 mean accuracy / macro-F1 to 0.765 / 0.746. Accuracy improved in 12 categories, was unchanged for Bottle, and fell for Capsule, so the transform set is a strong default but not a universal guarantee. ConvNeXt-Tiny reached 0.944 on Screw (ResNet18 baseline 0.194) and 1.000 on Grid (0.222), while Pill improved from 0.372 to 0.605 with ResNet18 augmentation. Because each epoch contains more updates, the comparison does not isolate transform diversity from optimization budget; Toothbrush is N/A and the validation sets are small. Confirm with repeated seeds, nested cross-validation, and a fixed-update control.
 - **Voting did not improve the strong ConvNeXt-Tiny baseline; bagging was mixed.** On the same nine small validation splits, four-model hard voting averaged 0.893 accuracy / 0.889 macro-F1, equal soft voting 0.897 / 0.894, and a 70%-ConvNeXt soft vote exactly matched ConvNeXt-Tiny at 0.930 / 0.925. Three-seed, class-stratified ConvNeXt bagging averaged 0.922 / 0.920: it helped bottle, hazelnut, and wood, but grid fell from 1.000 to 0.833. The bottle/wood ConvNeXt-DenseNet sweep did not beat the best individual model. Do not adopt a global vote or bagging default from this run; test seed variability and out-of-fold predictions first.
 - **Category routing is model selection, not a prediction-fusing ensemble or automatically a hybrid model.** Choosing DenseNet121 for bottle and wood and ConvNeXt-Tiny elsewhere averaged 0.942 / 0.938, but the route was selected after inspecting these same validation results, so this is a post-hoc upper-bound candidate, not an unbiased performance estimate. This score assumes the category is already known correctly; it does not include category-classifier routing errors. Here routing means selecting one model by category, with no model predictions combined and no learned gate. Call it category-specific model selection/routing; a learned category gate with specialist models could be described as a mixture-of-experts, while the overall inspection pipeline is hybrid because it integrates distinct methods (for example, PatchCore anomaly detection plus supervised defect classification). Validate any routing rule end-to-end inside nested cross-validation before deployment.
 - **An identical-config rerun can shift a tiny validation set by a whole image.** The ResNet18 no-augmentation baseline gave hazelnut 0.857 in one run and 0.905 in a rerun (one image of 21, 4.8 points) with the same seed and split but a different thread count. Differences of one or two images between models, such as bottle (0.842 vs 0.895) and wood, are within that noise.

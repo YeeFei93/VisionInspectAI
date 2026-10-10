@@ -95,6 +95,31 @@ def should_make_prediction(
     return confidence >= threshold
 
 
+class EqualSoftVotingClassifier(torch.nn.Module):
+    def __init__(
+        self, members: list[torch.nn.Module], weights: list[float] | None = None
+    ) -> None:
+        super().__init__()
+        if not members:
+            raise ValueError("At least one classifier is required for soft voting")
+        if weights is None:
+            weights = [1.0] * len(members)
+        if len(weights) != len(members) or any(weight < 0 for weight in weights):
+            raise ValueError("Voting weights must match members and be non-negative")
+        weight_tensor = torch.tensor(weights, dtype=torch.float32)
+        if float(weight_tensor.sum()) <= 0:
+            raise ValueError("Voting weights must have a positive sum")
+        self.register_buffer("weights", weight_tensor / weight_tensor.sum())
+        self.members = torch.nn.ModuleList(members)
+
+    def forward(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        probabilities = torch.stack(
+            [F.softmax(member(input_tensor), dim=1) for member in self.members]
+        )
+        probabilities = (probabilities * self.weights[:, None, None]).sum(dim=0)
+        return probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()
+
+
 def classify_severity(
     anomaly_map: torch.Tensor, foreground_mask: np.ndarray, threshold: float
 ) -> tuple[str | None, str]:
@@ -406,6 +431,85 @@ class InspectionPipeline:
 
         model_config = config["model"]
         defect_config = config.get("defect_classifier", {})
+        ensemble_architectures = defect_config.get("ensemble_architectures")
+        if ensemble_architectures:
+            if len(set(ensemble_architectures)) != len(ensemble_architectures):
+                raise InspectionSetupError(
+                    f"Duplicate defect-classifier ensemble architectures for {category}"
+                )
+            checkpoint_dir = (
+                self.project_root
+                / config["output"]["checkpoint_dir"]
+                / "ensemble_members"
+            )
+            metrics_dir = (
+                self.project_root
+                / config["output"]["metrics_dir"]
+                / "ensemble_members"
+            )
+            seed = int(defect_config.get("ensemble_seed", 42))
+            ensemble_weights = defect_config.get("ensemble_weights")
+            members = []
+            metadata_by_architecture = []
+            for architecture in ensemble_architectures:
+                member_name = (
+                    f"defect_classifier_{architecture}_{category}_seed{seed}"
+                )
+                checkpoint_path = checkpoint_dir / f"{member_name}.pt"
+                metrics_path = metrics_dir / f"{member_name}_metrics.json"
+                if not checkpoint_path.exists() or not metrics_path.exists():
+                    raise InspectionSetupError(
+                        f"Missing soft-voting member artifacts for {category} "
+                        f"({architecture}, seed {seed}). Expected {checkpoint_path} "
+                        f"and {metrics_path}."
+                    )
+                with metrics_path.open(encoding="utf-8") as metrics_file:
+                    metadata_by_architecture.append(json.load(metrics_file))
+
+            reference_metadata = metadata_by_architecture[0]
+            defect_types = reference_metadata["defect_types"]
+            for architecture, metadata in zip(
+                ensemble_architectures, metadata_by_architecture
+            ):
+                if metadata.get("defect_types") != defect_types:
+                    raise InspectionSetupError(
+                        f"Defect-label order mismatch in {architecture} ensemble "
+                        f"member for {category}"
+                    )
+                model = build_baseline_model(
+                    architecture=architecture,
+                    num_classes=len(defect_types),
+                    pretrained=False,
+                )
+                member_name = (
+                    f"defect_classifier_{architecture}_{category}_seed{seed}"
+                )
+                state = torch.load(
+                    checkpoint_dir / f"{member_name}.pt",
+                    map_location=self.device,
+                )
+                model.load_state_dict(state)
+                model.eval()
+                members.append(model)
+
+            metadata = dict(reference_metadata)
+            if ensemble_weights is None:
+                ensemble_strategy = "equal_soft_vote"
+            else:
+                if len(ensemble_weights) != len(ensemble_architectures):
+                    raise InspectionSetupError(
+                        f"Ensemble weights must match architectures for {category}"
+                    )
+                ensemble_strategy = "convnext_heavy_soft_vote"
+            metadata["ensemble_strategy"] = ensemble_strategy
+            metadata["ensemble_architectures"] = list(ensemble_architectures)
+            classifier = EqualSoftVotingClassifier(
+                members, weights=ensemble_weights
+            ).to(self.device).eval()
+            loaded = classifier, defect_types, metadata
+            self._defect_classifiers[category] = loaded
+            return loaded
+
         classifier_architecture = defect_config.get(
             "architecture", model_config["architecture"]
         )

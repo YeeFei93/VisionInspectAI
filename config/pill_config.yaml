@@ -1,7 +1,7 @@
-category: wood
+category: pill
 
 data:
-  manifest_path: data/manifests/wood.csv
+  manifest_path: data/manifests/pill.csv
   image_size: 224
   val_split: 0.3
   seed: 42
@@ -12,11 +12,9 @@ model:
   num_classes: 2
 
 defect_classifier:
-  architecture: convnext_tiny
   ensemble_architectures: [convnext_tiny, resnet18, efficientnet_b0, densenet121]
   ensemble_seed: 42
   ensemble_weights: [0.7, 0.1, 0.1, 0.1]
-  use_focused_crops: false
 
 train:
   batch_size: 16
@@ -31,7 +29,8 @@ anomaly_detection:
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
-  use_foreground_mask: false
+  # use_foreground_mask decided from label-free train/good mask inspection, true: plain white background and a clean, hole-free object mask (foreground fraction 0.40 on every train/good image checked).
+  use_foreground_mask: true
   # Normal-only threshold calibration (see README threshold-calibration section).
   calibration:
     enabled: true

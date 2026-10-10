@@ -342,7 +342,8 @@ def run_category(category, device, benchmark_start):
     total_members = 1 + len(ARCHITECTURES) + len(CONVNEXT_BAGGING_SEEDS)
     print(
         f"\n{category}: {len(train_rows)} train / {len(val_rows)} validation; "
-        f"ConvNeXt seed 42 reused for voting; training {total_members - 1} additional members",
+        "ConvNeXt seed 42 loaded if available (otherwise trained); "
+        f"evaluating {total_members} members",
         flush=True,
     )
 
@@ -350,17 +351,55 @@ def run_category(category, device, benchmark_start):
     run_records = []
     per_image_records = []
     member_index = 1
-    member_start = time.perf_counter()
-    print(
-        f"PROGRESS category={category} model={member_index}/{total_members} "
-        f"convnext_tiny seed=42 status=LOAD "
-        f"total_elapsed={format_elapsed(member_start - benchmark_start)}",
-        flush=True,
+    output_cfg = config["output"]
+    convnext_checkpoint = (
+        PROJECT_ROOT
+        / output_cfg["checkpoint_dir"]
+        / f"defect_classifier_convnext_tiny_{category}.pt"
     )
-    convnext_probs, y_true, convnext_metadata = load_convnext_seed42(
-        category, config, defect_types, val_loader, device
+    convnext_metadata_path = (
+        PROJECT_ROOT
+        / output_cfg["metrics_dir"]
+        / f"defect_classifier_convnext_tiny_{category}_metrics.json"
     )
+    if convnext_checkpoint.exists() and convnext_metadata_path.exists():
+        member_start = time.perf_counter()
+        print(
+            f"PROGRESS category={category} model={member_index}/{total_members} "
+            f"convnext_tiny seed=42 status=LOAD "
+            f"total_elapsed={format_elapsed(member_start - benchmark_start)}",
+            flush=True,
+        )
+        convnext_probs, y_true, convnext_metadata = load_convnext_seed42(
+            category, config, defect_types, val_loader, device
+        )
+        convnext_training_record = None
+    else:
+        print(
+            f"PROGRESS category={category} model={member_index}/{total_members} "
+            "convnext_tiny seed=42 status=TRAIN_MISSING_DEPLOYMENT_MODEL",
+            flush=True,
+        )
+        convnext_probs, y_true, convnext_training_record = train_member(
+            category,
+            "convnext_tiny",
+            int(data_cfg["seed"]),
+            train_rows,
+            val_loader,
+            defect_types,
+            config,
+            device,
+            benchmark_start,
+            member_index,
+            total_members,
+        )
+        convnext_metadata = None
     predictions["convnext_tiny"] = convnext_probs
+    convnext_record_metadata = {"seed": 42}
+    if convnext_training_record is not None:
+        convnext_record_metadata["final_train_loss"] = convnext_training_record[
+            "final_train_loss"
+        ]
     record, image_records = evaluate_predictions(
         category,
         "single_convnext_tiny",
@@ -368,17 +407,18 @@ def run_category(category, device, benchmark_start):
         convnext_probs,
         defect_types,
         image_paths,
-        {"seed": 42},
+        convnext_record_metadata,
     )
     run_records.append(record)
     per_image_records.extend(image_records)
-    print(
-        f"PROGRESS category={category} model={member_index}/{total_members} "
-        f"convnext_tiny seed=42 status=DONE "
-        f"model_elapsed={format_elapsed(time.perf_counter() - member_start)} "
-        f"total_elapsed={format_elapsed(time.perf_counter() - benchmark_start)}",
-        flush=True,
-    )
+    if convnext_training_record is None:
+        print(
+            f"PROGRESS category={category} model={member_index}/{total_members} "
+            f"convnext_tiny seed=42 status=DONE "
+            f"model_elapsed={format_elapsed(time.perf_counter() - member_start)} "
+            f"total_elapsed={format_elapsed(time.perf_counter() - benchmark_start)}",
+            flush=True,
+        )
     member_index += 1
 
     for architecture in ARCHITECTURES:

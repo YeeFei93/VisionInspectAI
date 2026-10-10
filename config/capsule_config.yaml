@@ -1,7 +1,7 @@
-category: wood
+category: capsule
 
 data:
-  manifest_path: data/manifests/wood.csv
+  manifest_path: data/manifests/capsule.csv
   image_size: 224
   val_split: 0.3
   seed: 42
@@ -12,11 +12,9 @@ model:
   num_classes: 2
 
 defect_classifier:
-  architecture: convnext_tiny
   ensemble_architectures: [convnext_tiny, resnet18, efficientnet_b0, densenet121]
   ensemble_seed: 42
   ensemble_weights: [0.7, 0.1, 0.1, 0.1]
-  use_focused_crops: false
 
 train:
   batch_size: 16
@@ -31,6 +29,7 @@ anomaly_detection:
   max_coreset_size: 2000
   projection_dim: 128
   batch_size: 16
+  # use_foreground_mask decided from label-free train/good mask inspection, false: Otsu treats the black half of the capsule as background, which would suppress half the part.
   use_foreground_mask: false
   # Normal-only threshold calibration (see README threshold-calibration section).
   calibration:

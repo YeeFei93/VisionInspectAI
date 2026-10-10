@@ -144,6 +144,81 @@ def test_defect_classifier_uses_architecture_override(tmp_path, monkeypatch):
     assert loaded[1] == ["scratch"]
 
 
+def test_defect_classifier_loads_equal_soft_voting_ensemble(tmp_path, monkeypatch):
+    import src.inference.inspection_pipeline as inspection_pipeline
+
+    checkpoint_dir = tmp_path / "checkpoints" / "ensemble_members"
+    metrics_dir = tmp_path / "metrics" / "ensemble_members"
+    checkpoint_dir.mkdir(parents=True)
+    metrics_dir.mkdir(parents=True)
+    logits_by_architecture = {
+        "convnext_tiny": torch.tensor([[2.0, 0.0]]),
+        "resnet18": torch.tensor([[0.0, 1.0]]),
+    }
+
+    class FixedLogitModel(torch.nn.Module):
+        def __init__(self, logits):
+            super().__init__()
+            self.register_buffer("logits", logits)
+
+        def forward(self, input_tensor):
+            return self.logits.expand(input_tensor.shape[0], -1)
+
+    for architecture, logits in logits_by_architecture.items():
+        member_name = f"defect_classifier_{architecture}_cable_seed42"
+        torch.save(
+            FixedLogitModel(logits).state_dict(),
+            checkpoint_dir / f"{member_name}.pt",
+        )
+        (metrics_dir / f"{member_name}_metrics.json").write_text(
+            json.dumps(
+                {
+                    "defect_types": ["crack", "scratch"],
+                    "image_size": 224,
+                    "crop_mode": "full_image",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        inspection_pipeline,
+        "build_baseline_model",
+        lambda architecture, num_classes, pretrained: FixedLogitModel(
+            logits_by_architecture[architecture]
+        ),
+    )
+    pipeline = InspectionPipeline(project_root=tmp_path)
+    loaded = pipeline._load_defect_classifier(
+        "cable",
+        {
+            "model": {"architecture": "resnet18"},
+            "defect_classifier": {
+                "ensemble_architectures": ["convnext_tiny", "resnet18"],
+                "ensemble_seed": 42,
+            },
+            "output": {
+                "checkpoint_dir": "checkpoints",
+                "metrics_dir": "metrics",
+            },
+        },
+    )
+
+    assert loaded is not None
+    model, defect_types, metadata = loaded
+    expected_probabilities = torch.stack(
+        [
+            torch.softmax(logits_by_architecture[architecture], dim=1)
+            for architecture in ("convnext_tiny", "resnet18")
+        ]
+    ).mean(dim=0)
+    actual_probabilities = torch.softmax(model(torch.zeros(1, 3, 224, 224)), dim=1)
+
+    assert defect_types == ["crack", "scratch"]
+    assert metadata["ensemble_strategy"] == "equal_soft_vote"
+    assert torch.allclose(actual_probabilities, expected_probabilities)
+
+
 def test_keep_primary_anomaly_region_suppresses_disconnected_noise():
     anomaly_map = torch.zeros((8, 8))
     anomaly_map[1:3, 1:3] = 0.7
