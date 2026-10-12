@@ -41,6 +41,12 @@ DEFAULT_CATEGORY_CONFIGS = {
         "grid",
         "tile",
         "wood",
+        "cable",
+        "capsule",
+        "metal_nut",
+        "pill",
+        "toothbrush",
+        "zipper",
     )
 }
 

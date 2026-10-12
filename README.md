@@ -842,7 +842,7 @@ python -m src.models.run_patchcore_autoencoder_ensemble --config config/transist
 | AE-SSIM | 0.832 / 0.929 / 0.60 | 0.964 / 0.954 / 0.82 | 0.983 / 0.961 / 0.91 | 0.991 / 0.966 / 0.94 | **0.995 / 0.969 / 0.93** | 0.995 / 0.971 / 0.91 | 0.995 / 0.972 / 0.88 | 0.993 / 0.972 / 0.88 | 0.992 / 0.970 / 0.88 | 0.990 / 0.967 / 0.88 |
 
 **Findings:**
-- **Fusion helps, modestly, on every axis except post-processed IoU for the MSE autoencoder.** Image AUROC rises 0.9896 → 0.9933 (L2) / 0.9946 (SSIM), pixel AUROC 0.9665 → 0.9723 / 0.9690, F1 0.879 → 0.909 / 0.930, with recall still 1.00 and false alarms down from 11/60 to 8/60 / 6/60. The AUROC gains are small (~0.4–0.5 points on 100 images, equivalent to a few good/defective pairs), so treat them as consistent but not statistically established; the precision/F1 gain is the larger practical effect.
+- **Fusion helps, modestly, on every axis except post-processed IoU for the MSE autoencoder.** Image AUROC rises 0.9896 → 0.9933 (L2) / 0.9946 (SSIM), pixel AUROC 0.9665 → 0.9723 / 0.9690, F1 0.879 → 0.909 / 0.930, with recall still 1.00 and false alarms down from 11/60 to 8/60 / 6/60. The AUROC gains are small (~0.4–0.5 points on 100 images, equivalent to a few good/defective pairs), so treat them as consistent but not statistically established — a stratified paired bootstrap over the 100 test images (2,000 resamples, ensemble minus PatchCore) gives image-AUROC differences of +0.0036 (95% CI −0.0067 to +0.0162) for L2 and +0.0047 (−0.0046 to +0.0179) for SSIM, and F1 differences of +0.030 (−0.010 to +0.076) and +0.050 (0.000 to +0.099), so every interval includes or touches zero; the precision/F1 gain is the larger practical effect.
 - **The complementarity is real and visible per type:** the autoencoder is perfect on the gross `misplaced` defect (1.000) where PatchCore is weakest (0.975), and the fused score inherits the 1.000. On the tiny `bent_lead` / `cut_lead` / `damaged_case` defects the autoencoder carries no useful signal (0.65–0.90 alone), so the ensemble stays at PatchCore's level there (0.982–0.998, within ±0.005 of PatchCore, with dips of at most 0.005 on `bent_lead`, `cut_lead` and `damaged_case`) — i.e. fusion does not add sensitivity to small defects, it removes PatchCore's weak spot and some false alarms.
 - **Fused heatmaps localize better as rankings (pixel AUROC, raw IoU/Dice 0.252/0.352 → 0.295/0.404 and 0.294/0.401), but the detector-specific `keep_primary_region` postprocessing interacts badly with the fusion for L2** (post-processed IoU/Dice 0.315/0.455 → 0.177/0.264) while it helps for SSIM (→ 0.385/0.526). The mixed heatmap's peak sometimes lands on a normal lead edge that the autoencoder over-weights (see `outputs/heatmaps/ensemble_patchcore_autoencoder_*_comparison.png`: PatchCore, autoencoder and ensemble maps side by side with the calibrated contour and the ground truth in green).
 - **α = 0.5 is reasonable, not optimal.** Image AUROC is flat (0.989–0.996) for α ∈ [0.4, 0.9]; F1 peaks at α ≈ 0.4–0.5 and degrades toward PatchCore's 0.879 for α ≥ 0.7, while post-processed IoU/Dice for the L2 ensemble keep improving toward α = 1. Min-max normalization (calibration range) gave the same picture (e.g. AE-L2 α = 0.5: 0.993 / 0.976 / F1 0.889). No α was selected from this table.
@@ -904,6 +904,12 @@ These PatchCore numbers use normal-only threshold calibration (see [Threshold Ca
 | Tile | 0.94 / 0.96 | 0.998 | 0.939 | 0.281 | 0.411 |
 | Wood | 1.00 / 1.00 | 0.996 | 0.931 | 0.103 | 0.174 |
 | Transistor | 0.93 / 0.91 | 0.990 | 0.967 | 0.315 | 0.455 |
+| Cable | — | 0.988 | 0.981 | 0.243 | 0.374 |
+| Capsule | — | 0.935 | 0.983 | 0.049 | 0.090 |
+| Metal nut | — | **0.991** | 0.979 | 0.338 | 0.459 |
+| Pill | — | 0.901 | 0.958 | 0.166 | 0.238 |
+| Toothbrush | — | 0.956 | **0.989** | 0.104 | 0.177 |
+| Zipper | — | 0.963 | 0.985 | 0.098 | 0.175 |
 
 **Finding — the classifier's "perfect scores" issue isn't universal.** Unlike screw and hazelnut, the bottle classifier scored a believable 0.88 accuracy / 0.92 F1, not 1.0 (its held-out val subset is smaller — only 25 images — and the defects are more subtle). This is a useful counter-example confirming that the earlier "misleadingly perfect" finding is specifically a symptom of the *screw* dataset being small/easy, not a bug in the evaluation code.
 
