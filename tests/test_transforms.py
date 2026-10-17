@@ -26,17 +26,17 @@ def test_train_transforms_have_no_random_rotation():
 
 
 @pytest.mark.parametrize(
-    "category", ["screw", "bottle", "hazelnut", "carpet", "leather", "grid", "tile"]
+    "category",
+    [
+        "screw", "bottle", "hazelnut", "carpet", "leather", "wood",
+        "grid", "tile", "cable", "capsule", "metal_nut", "pill", "zipper",
+    ],
 )
 def test_default_categories_use_all_flips_and_quarter_turns(category):
     variants = get_defect_augmentation_variants(category, "any_defect")
 
     assert variants == DEFAULT_DEFECT_VARIANTS
     assert {"hflip", "vflip", "rot90", "rot180", "rot270"} <= set(variants)
-
-
-def test_wood_uses_flips_only():
-    assert get_defect_augmentation_variants("wood", "color") == ("identity", "hflip", "vflip")
 
 
 def test_transistor_variants_depend_on_defect_type():

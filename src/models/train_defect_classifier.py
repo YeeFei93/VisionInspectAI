@@ -112,6 +112,11 @@ def build_defect_manifest(manifest_path: Path):
     manifest = load_manifest(manifest_path)
     defective = manifest[(manifest["split"] == "test") & (manifest["label"] == 1)].copy()
     defect_types = sorted(defective["defect_type"].unique())
+    if len(defect_types) < 2:
+        raise ValueError(
+            "Defect-type classification requires at least two distinct defect types; "
+            f"found {len(defect_types)} ({defect_types})."
+        )
     defective["label"] = defective["defect_type"].map(defect_types.index)
     return defective.reset_index(drop=True), defect_types
 

@@ -23,8 +23,6 @@ DEFAULT_DEFECT_VARIANTS = (
 
 def get_defect_augmentation_variants(category: str, defect_type: str) -> tuple:
     """Fixed (non-random) variants generated for one training image."""
-    if category == "wood":
-        return ("identity", "hflip", "vflip")
     if category == "transistor":
         if defect_type == "misplaced":
             return ("identity", "hflip", "vflip", "rot180")

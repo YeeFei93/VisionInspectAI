@@ -11,6 +11,10 @@ model:
   pretrained: true
   num_classes: 2
 
+defect_classifier:
+  ensemble_architectures: [convnext_tiny, resnet18, efficientnet_b0, densenet121]
+  ensemble_seed: 42
+
 train:
   batch_size: 16
   epochs: 10

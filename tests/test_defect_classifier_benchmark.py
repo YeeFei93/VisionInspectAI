@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.models.benchmark_defect_classifiers import (
     classification_scores,
@@ -12,6 +15,24 @@ from src.models.run_defect_classifier_ensembles import (
     stratified_bootstrap_rows,
     weighted_soft_vote,
 )
+from src.models.train_defect_classifier import build_defect_manifest
+
+
+def test_build_defect_manifest_rejects_single_defect_type(monkeypatch):
+    manifest = pd.DataFrame(
+        {
+            "split": ["test", "test"],
+            "label": [1, 1],
+            "defect_type": ["defective", "defective"],
+        }
+    )
+    monkeypatch.setattr(
+        "src.models.train_defect_classifier.load_manifest",
+        lambda _path: manifest,
+    )
+
+    with pytest.raises(ValueError, match="at least two distinct defect types"):
+        build_defect_manifest(Path("unused.csv"))
 
 
 def test_classification_scores_reports_accuracy_and_macro_f1():
@@ -110,6 +131,21 @@ def test_weight_sweep_is_limited_to_bottle_and_wood():
     assert "convnext_50_densenet_50" in bottle_strategies
     assert "convnext_75_densenet_25" in bottle_strategies
     assert not any("densenet_" in name for name in screw_strategies)
+
+
+def test_category_routed_single_uses_cv_selected_models():
+    predictions = {
+        name: np.array([[0.9, 0.1]])
+        for name in ("convnext_tiny", "resnet18", "efficientnet_b0", "densenet121")
+    }
+
+    bottle = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "bottle")
+    cable = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "cable")
+    pill = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "pill")
+
+    assert bottle["category_routed_single_model"][1]["routed_architecture"] == "convnext_tiny"
+    assert cable["category_routed_single_model"][1]["routed_architecture"] == "densenet121"
+    assert pill["category_routed_single_model"][1]["routed_architecture"] == "convnext_tiny"
 
 
 def test_stratified_bootstrap_preserves_each_class_count_with_replacement():

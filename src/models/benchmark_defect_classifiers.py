@@ -2,7 +2,8 @@
 
 Runs a no-augmentation ResNet18 baseline, then compares ResNet18, ConvNeXt-Tiny,
 EfficientNet-B0, and DenseNet121 trained on fixed flip/rotation variants of each
-training image (see get_defect_augmentation_variants) across the nine categories.
+training image (see get_defect_augmentation_variants) across categories with
+multiple defect types.
 """
 
 import argparse
@@ -43,6 +44,11 @@ CATEGORIES = (
     "grid",
     "tile",
     "transistor",
+    "cable",
+    "capsule",
+    "metal_nut",
+    "pill",
+    "zipper",
 )
 OUTPUT_PREFIX = "defect_classifier_variant_augmentation"
 SUPPORTED_ARCHITECTURES = (
@@ -373,7 +379,7 @@ def main() -> None:
         "device": str(device),
         "seed_policy": "category config seed reset before each model run",
         "split_policy": "one stratified train/validation split per category, reused for every run",
-        "augmentation": "deterministic per-image variants (flips and exact 90/180/270 rotations; wood flips only; transistor restricted); training only",
+        "augmentation": "deterministic training-only per-image variants (flips and exact 90/180/270 rotations, with category-specific restrictions)",
         "architectures": args.architectures,
         "baseline": "ResNet18 with no augmentation" if not args.skip_baseline else None,
         "deployment_checkpoints_saved": args.save_deployment_checkpoints,
