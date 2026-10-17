@@ -116,7 +116,7 @@ def build_ensemble_strategies(probabilities_by_model, convnext_bagged, category)
             {"members": "convnext_tiny", "seeds": "42,43,44"},
         ),
     }
-    routed_model = "densenet121" if category in {"bottle", "wood"} else "convnext_tiny"
+    routed_model = "densenet121" if category == "cable" else "convnext_tiny"
     strategies["category_routed_single_model"] = (
         probabilities_by_model[routed_model],
         {"members": routed_model, "routed_architecture": routed_model},

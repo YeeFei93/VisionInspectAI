@@ -13,9 +13,6 @@ model:
 
 defect_classifier:
   architecture: convnext_tiny
-  ensemble_architectures: [convnext_tiny, resnet18, efficientnet_b0, densenet121]
-  ensemble_seed: 42
-  ensemble_weights: [0.7, 0.1, 0.1, 0.1]
   use_focused_crops: false
 
 train:

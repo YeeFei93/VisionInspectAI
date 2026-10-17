@@ -133,6 +133,21 @@ def test_weight_sweep_is_limited_to_bottle_and_wood():
     assert not any("densenet_" in name for name in screw_strategies)
 
 
+def test_category_routed_single_uses_cv_selected_models():
+    predictions = {
+        name: np.array([[0.9, 0.1]])
+        for name in ("convnext_tiny", "resnet18", "efficientnet_b0", "densenet121")
+    }
+
+    bottle = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "bottle")
+    cable = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "cable")
+    pill = build_ensemble_strategies(predictions, predictions["convnext_tiny"], "pill")
+
+    assert bottle["category_routed_single_model"][1]["routed_architecture"] == "convnext_tiny"
+    assert cable["category_routed_single_model"][1]["routed_architecture"] == "densenet121"
+    assert pill["category_routed_single_model"][1]["routed_architecture"] == "convnext_tiny"
+
+
 def test_stratified_bootstrap_preserves_each_class_count_with_replacement():
     rows = pd.DataFrame(
         {
