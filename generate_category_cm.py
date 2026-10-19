@@ -28,7 +28,7 @@ disp.plot(
     colorbar=False,
     xticks_rotation="vertical" if len(categories) > 4 else "horizontal",
 )
-ax.set_title("Category classifier — confusion matrix (9 categories)")
+ax.set_title(f"Category classifier — confusion matrix ({len(categories)} categories)")
 fig.tight_layout()
 
 output_path = Path("outputs/figures/category_classifier_resnet18_confusion_matrix.png")
