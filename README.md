@@ -588,7 +588,7 @@ unsupervised anomaly localization.
 
 ### Category Classifier Benchmark — All 15 Categories
 
-Training on all 15 MVTec-AD categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) with 5,354 total images (3,629 MVTec `train/` rows split 70/30 into 2,540 train / 1,089 validation for early stopping, plus the 1,725 MVTec `test/` rows held out and evaluated once as the final test set) using a ResNet18 classifier (seed 42) yielded the following results:
+Training on all 15 MVTec-AD categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) with 5,354 total images (3,629 MVTec `train/` rows split 70/30 into 2,540 train / 1,089 validation for early stopping, plus the 1,725 MVTec `test/` rows held out and evaluated once as the final test set) using a ResNet18 classifier (seed 42) given its superior performance for the baseline classifier yielded the following results:
 
 | Metric | Result |
 |---|---|
@@ -1170,6 +1170,18 @@ Reproduce the run with `python -m src.models.run_defect_classifier_cv --category
 - The historical 0.913 / 0.910 category-routed aggregate above used the old, post-hoc Bottle/Cable/Pill DenseNet route on one split. It is not the final model set and must not be compared as if it were measured under this repeated-CV protocol.
 
 **Recommendation:** use augmented ConvNeXt-Tiny as the single-model default, DenseNet121 for Cable, and a four-member equal-soft-voting ensemble for Pill. Keep the screw focused-crop setting unchanged. Bottle stays on ConvNeXt-Tiny. The other categories retain their existing ConvNeXt-Tiny single-model choice; those categories were not included in this focused repeated-CV run, so their evidence remains the earlier single-split comparison. CV results here are exploratory because the architecture/strategy choice is made after comparing these same repeated splits, and the repeats reuse the same images. Avoid claiming statistical significance or treating the repeated prediction totals as independent samples.
+
+**Final performance summary — ResNet18 baseline vs. final category-routed defect-type classifier.** Both rows use the same seed-42 70/30 stratified validation split (373 images over the 14 scored categories; Toothbrush is N/A). The final route is augmented ConvNeXt-Tiny by default, DenseNet121 for Cable, and the four-member equal-soft-vote ensemble for Pill. Mean ± SD is the population SD across categories.
+
+| Model | Mean val accuracy ± SD | Mean macro-F1 ± SD | Pooled correct (373 images) |
+|---|---:|---:|---:|
+| ResNet18, no augmentation (baseline) | 0.659 ± 0.245 | 0.651 ± 0.250 | 236 (63.3%) |
+| **Final category-routed (ConvNeXt-Tiny aug. default + DenseNet121 Cable + 4-model soft-vote Pill)** | **0.913 ± 0.072** | **0.909 ± 0.073** | **338 (90.6%)** |
+| Improvement | **+25.4 points** | **+25.8 points** | **+102 images (+27.3 points)** |
+
+Per-category change (accuracy, baseline → final): Screw 0.194 → 0.944 (+75.0), Grid 0.222 → 1.000 (+77.8), Pill 0.372 → 0.814 (+44.2), Zipper 0.611 → 0.889 (+27.8), Capsule 0.485 → 0.758 (+27.3), Transistor 0.667 → 0.917 (+25.0), Wood 0.667 → 0.889 (+22.2), Cable 0.714 → 0.893 (+17.9), Carpet 0.778 → 0.926 (+14.8), Metal nut 0.857 → 1.000 (+14.3), Tile 0.923 → 1.000 (+7.7), Leather 0.929 → 1.000 (+7.1), Hazelnut 0.905 → 0.905 (0.0), Bottle 0.895 → 0.842 (−5.3, one image). The SD across categories also falls from 0.245 to 0.072, i.e. performance is far more uniform, with 10 of 14 categories now at ≥ 0.889.
+
+Caveats: the final row reuses single-split values (Pill's 0.814 / 0.820 is the equal soft vote on that split; the repeated-CV Pill estimate is lower at 0.766 / 0.778), and the architecture choices were made after seeing validation results, so the final row is optimistic and not an independent test estimate. The gain also bundles augmentation (more optimizer updates), the architecture change, and the Cable/Pill routing. The category-routed score assumes the object category is known; the [category classifier](#supervised-category-classifier) scored 1.000 on the 1,725-image test set, so routing errors are not expected to change it.
 
 **Deployment status:** the Streamlit configs now use the revised category choices: DenseNet121 for Cable, equal soft voting for Pill, and ConvNeXt-Tiny single models otherwise (preserving screw's focused-crop configuration). The Cable DenseNet121 and Capsule/Metal nut/Zipper ConvNeXt-Tiny seed-42 checkpoints and metadata are available at the single-model loader paths; they were copied from the matching `ensemble_members` artifacts. These files under `models/checkpoints/` and `outputs/metrics/` are gitignored generated artifacts, so regenerate the member models and restore these copies on a fresh checkout. The Pill equal-soft-vote members also need to be present under `ensemble_members/`. The configs and inference loader were smoke-tested against the local artifacts; this is a category-specific prediction policy, not a globally deployed ensemble.
 
