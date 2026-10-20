@@ -307,7 +307,7 @@ Experimental overrides append identifiers instead of overwriting the default art
 
 **What it does:** unlike the Step 2 good/defective classifier, this only looks at a single category's *defective* test/ rows and predicts which `defect_type` it is (e.g. leather: `color`/`cut`/`fold`/`glue`/`poke`), on a stratified train/val split over just those defect types.
 
-**Algorithm:** builds the configured CNN with an `N`-way head (`N` = number of defect types). It uses `defect_classifier.architecture` when present, falling back to `model.architecture`; the canonical nine-category configs currently select ConvNeXt-Tiny for defect typing, independently of the good/defective classifier architecture. Pretrained weights are controlled by `model.pretrained`. The ordinary trainer applies `get_train_transforms` (resize, random horizontal flip, tensor conversion and ImageNet normalization) to training images; validation is deterministic and unaugmented. It trains with cross-entropy + Adam for up to 10 epochs, seeds NumPy/PyTorch from `data.seed`, restores the lowest-validation-loss weights, and early-stops after `train.early_stopping_patience` (default 3) epochs without improvement. `--freeze-backbone` freezes everything except the architecture-specific classification head; `--learning-rate` and `--epochs` override the config values.
+**Algorithm:** builds the configured CNN with an `N`-way head (`N` = number of defect types). It uses `defect_classifier.architecture` when present, falling back to `model.architecture`; of the 15 canonical category configs, 12 (bottle, capsule, carpet, grid, hazelnut, leather, metal_nut, screw, tile, transistor, wood, zipper) select ConvNeXt-Tiny for defect typing, independently of the good/defective classifier architecture; `cable` selects DenseNet-121, `pill` uses a four-model ensemble (ConvNeXt-Tiny, ResNet18, EfficientNet-B0, DenseNet-121), and `toothbrush` has no `defect_classifier` section, so it falls back to `model.architecture` (ResNet18). Pretrained weights are controlled by `model.pretrained`. The ordinary trainer applies `get_train_transforms` (resize, random horizontal flip, tensor conversion and ImageNet normalization) to training images; validation is deterministic and unaugmented. It trains with cross-entropy + Adam for up to 10 epochs, seeds NumPy/PyTorch from `data.seed`, restores the lowest-validation-loss weights, and early-stops after `train.early_stopping_patience` (default 3) epochs without improvement. `--freeze-backbone` freezes everything except the architecture-specific classification head; `--learning-rate` and `--epochs` override the config values.
 
 **Augmentation distinction:** the ordinary `train_defect_classifier` command does not expand the dataset into fixed flip/quarter-turn variants. Those deterministic per-category variants are used by the separate [matched augmentation benchmark](#matched-augmentation-and-architecture-benchmark); its results should not be described as the default behavior of this training command. `--defect-focused-crops --crop-source patchcore` is a separate opt-in input-cropping option.
 
@@ -588,19 +588,23 @@ unsupervised anomaly localization.
 
 ### Category Classifier Benchmark — All 15 Categories
 
-Training on all 15 MVTec-AD categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) with 5,354 total images (3,629 train / 1,725 validation) using ResNet18's superior performance for the baseline classifier yielded the following results:
+Training on all 15 MVTec-AD categories (screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) with 5,354 total images (3,629 MVTec `train/` rows split 70/30 into 2,540 train / 1,089 validation for early stopping, plus the 1,725 MVTec `test/` rows held out and evaluated once as the final test set) using a ResNet18 classifier (seed 42) given its superior performance for the baseline classifier yielded the following results:
 
 | Metric | Result |
 |---|---|
-| Validation accuracy | **1.0000** |
-| Best epoch | 6 (out of 8) |
-| Per-class precision/recall/F1 | 1.0 / 1.0 / 1.0 (all categories) |
-| Training set size | 3,629 images |
-| Validation set size | 1,725 images |
+| Test accuracy (1,725 held-out images) | **1.0000** |
+| Best validation accuracy | 1.0000 (val loss 0.000134) |
+| Best epoch | 8 (out of 8; early stopping never triggered) |
+| Per-class precision/recall/F1 | 1.0 / 1.0 / 1.0 (all 15 categories) |
+| Training set size | 2,540 images |
+| Validation set size | 1,089 images |
+| Test set size | 1,725 images |
+
+The earlier 9-category run (bottle, carpet, grid, hazelnut, leather, screw, tile, transistor, wood) also reached perfect accuracy, so adding the six extra categories (cable, capsule, metal_nut, pill, toothbrush, zipper) did not degrade object-type recognition.
 
 **Visualizations:**
-- [Training curves](outputs/figures/category_classifier_resnet18_training_curves.png): train/validation loss converge smoothly to near-zero; validation accuracy reaches 1.0 by epoch 2 and stays perfect through epoch 8.
-- [Confusion matrix](outputs/figures/category_classifier_resnet18_confusion_matrix.png): perfect diagonal matrix with zero misclassifications across all 15 categories.
+- [Training curves](outputs/figures/category_classifier_resnet18_training_curves.png): validation accuracy is already 1.0 after epoch 1 (train accuracy 0.975) and stays perfect through epoch 8, while train loss falls from 0.131 to 0.0006.
+- [Confusion matrix](outputs/figures/category_classifier_resnet18_confusion_matrix.png): 15×15 perfect diagonal on the 1,725-image test set, zero misclassifications.
 
 **Finding:** whole object categories remain visually distinct and perfectly separable even at the full 15-category scale. Unlike the supervised good/defective baseline (which hits perfect metrics due to a tiny held-out split drawn from the same test set), this category classifier achieves 100% accuracy on the object-type task because the MVTec categories have massive visual differences (bottle's cylindrical top vs. screw's hexagonal head vs. carpet's flat textile surface, etc.) — this is a genuinely easy classification problem with clear natural clustering.
 
@@ -1166,6 +1170,18 @@ Reproduce the run with `python -m src.models.run_defect_classifier_cv --category
 - The historical 0.913 / 0.910 category-routed aggregate above used the old, post-hoc Bottle/Cable/Pill DenseNet route on one split. It is not the final model set and must not be compared as if it were measured under this repeated-CV protocol.
 
 **Recommendation:** use augmented ConvNeXt-Tiny as the single-model default, DenseNet121 for Cable, and a four-member equal-soft-voting ensemble for Pill. Keep the screw focused-crop setting unchanged. Bottle stays on ConvNeXt-Tiny. The other categories retain their existing ConvNeXt-Tiny single-model choice; those categories were not included in this focused repeated-CV run, so their evidence remains the earlier single-split comparison. CV results here are exploratory because the architecture/strategy choice is made after comparing these same repeated splits, and the repeats reuse the same images. Avoid claiming statistical significance or treating the repeated prediction totals as independent samples.
+
+**Final performance summary — ResNet18 baseline vs. final category-routed defect-type classifier.** Both rows use the same seed-42 70/30 stratified validation split (373 images over the 14 scored categories; Toothbrush is N/A). The final route is augmented ConvNeXt-Tiny by default, DenseNet121 for Cable, and the four-member equal-soft-vote ensemble for Pill. Mean ± SD is the population SD across categories.
+
+| Model | Mean val accuracy ± SD | Mean macro-F1 ± SD | Pooled correct (373 images) |
+|---|---:|---:|---:|
+| ResNet18, no augmentation (baseline) | 0.659 ± 0.245 | 0.651 ± 0.250 | 236 (63.3%) |
+| **Final category-routed (ConvNeXt-Tiny aug. default + DenseNet121 Cable + 4-model soft-vote Pill)** | **0.913 ± 0.072** | **0.909 ± 0.073** | **338 (90.6%)** |
+| Improvement | **+25.4 points** | **+25.8 points** | **+102 images (+27.3 points)** |
+
+Per-category change (accuracy, baseline → final): Screw 0.194 → 0.944 (+75.0), Grid 0.222 → 1.000 (+77.8), Pill 0.372 → 0.814 (+44.2), Zipper 0.611 → 0.889 (+27.8), Capsule 0.485 → 0.758 (+27.3), Transistor 0.667 → 0.917 (+25.0), Wood 0.667 → 0.889 (+22.2), Cable 0.714 → 0.893 (+17.9), Carpet 0.778 → 0.926 (+14.8), Metal nut 0.857 → 1.000 (+14.3), Tile 0.923 → 1.000 (+7.7), Leather 0.929 → 1.000 (+7.1), Hazelnut 0.905 → 0.905 (0.0), Bottle 0.895 → 0.842 (−5.3, one image). The SD across categories also falls from 0.245 to 0.072, i.e. performance is far more uniform, with 10 of 14 categories now at ≥ 0.889.
+
+Caveats: the final row reuses single-split values (Pill's 0.814 / 0.820 is the equal soft vote on that split; the repeated-CV Pill estimate is lower at 0.766 / 0.778), and the architecture choices were made after seeing validation results, so the final row is optimistic and not an independent test estimate. The gain also bundles augmentation (more optimizer updates), the architecture change, and the Cable/Pill routing. The category-routed score assumes the object category is known; the [category classifier](#supervised-category-classifier) scored 1.000 on the 1,725-image test set, so routing errors are not expected to change it.
 
 **Deployment status:** the Streamlit configs now use the revised category choices: DenseNet121 for Cable, equal soft voting for Pill, and ConvNeXt-Tiny single models otherwise (preserving screw's focused-crop configuration). The Cable DenseNet121 and Capsule/Metal nut/Zipper ConvNeXt-Tiny seed-42 checkpoints and metadata are available at the single-model loader paths; they were copied from the matching `ensemble_members` artifacts. These files under `models/checkpoints/` and `outputs/metrics/` are gitignored generated artifacts, so regenerate the member models and restore these copies on a fresh checkout. The Pill equal-soft-vote members also need to be present under `ensemble_members/`. The configs and inference loader were smoke-tested against the local artifacts; this is a category-specific prediction policy, not a globally deployed ensemble.
 
