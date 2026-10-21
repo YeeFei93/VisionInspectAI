@@ -1,6 +1,56 @@
 # VisionInspectAI
 Use MVTec-AD categories to detect whether an image is normal or defective, and show the defect location using a heatmap. Currently configured and routed through the Streamlit demo for all 15 categories: `screw`, `bottle`, `hazelnut`, `carpet`, `leather`, `wood`, `grid`, `tile`, `transistor`, `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, and `zipper`.
 
+## Results at a Glance
+
+All numbers below are copied from the detailed sections they link to; see those sections for protocol, caveats and per-category breakdowns.
+
+| Component | Task | Evaluation protocol | Headline result |
+|---|---|---|---|
+| Category classifier (ResNet18) | Which of the 15 objects is this? (routes the demo) | 1,725 held-out MVTec `test/` images, evaluated once | Accuracy **1.000**, perfect 15×15 confusion matrix ([details](#category-classifier-benchmark--all-15-categories)) |
+| PatchCore (unsupervised, ResNet18 `layer2+3`) | Normal vs. defective + defect heatmap | Fit on `train/good` only; thresholds from held-out normals; full MVTec `test/` scored once, all 15 categories | Mean image ROC-AUC **0.968** (0.899 screw → 1.000 bottle/leather), pixel ROC-AUC **0.958**, accuracy 0.899, F1 0.925, mean IoU/Dice 0.151 / 0.235 ([details](#generalization-to-other-categories)) |
+| Defect-type classifier (final category-routed: ConvNeXt-Tiny default, DenseNet121 cable, 4-model soft vote pill) | Which kind of defect is it? | Seed-42 stratified 70/30 split, 14 categories with subtype labels (373 images) | Mean accuracy **0.913 ± 0.072** (338/373 pooled) vs. 0.659 for the no-augmentation ResNet18 baseline; optimistic because the route was chosen after seeing these splits ([details](#ensemble-model-comparisons-and-tracking)) |
+| Supervised good/defective baseline | Normal vs. defective (reference model) | 70/30 split carved from labeled `test/` rows | ResNet18 mean val accuracy 97.6% over 5 categories; **not** an independent estimate, see [Notes](#2-historical-findings-and-experiment-specific-conclusions) ([details](#supervised-baseline-classifier-architecture-comparison-5-categories--6-architectures)) |
+| PatchCore + autoencoder ensemble (transistor only) | Hybrid unsupervised detection | Same calibration split and 100-image test set as PatchCore | Image ROC-AUC 0.9896 → **0.9946** (SSIM autoencoder), F1 0.879 → 0.930; the gain is not statistically established ([details](#unsupervised-ensemble-patchcore--autoencoder-transistor)) |
+
+Where PatchCore is weakest: `screw`, `grid`, `pill` and `capsule` (image ROC-AUC 0.899–0.935, recall 0.70–0.84) because the calibrated threshold is strict; `pill` and `capsule` are also the weakest at defect typing (0.814 and 0.758 in the final routed model). See the [full 15-category table](#generalization-to-other-categories) and [Limitations & Future Work](#limitations--future-work).
+
+## System Architecture
+
+```mermaid
+flowchart TD
+    subgraph OFFLINE["Offline: build artifacts (per category, driven by config/CATEGORY_config.yaml)"]
+        D[("MVTec-AD images<br/>train/good, test/*, ground_truth/*")] --> M["create_manifest.py<br/>data/manifests/CATEGORY.csv"]
+        M --> PC["run_anomaly_detection.py<br/>PatchCore memory bank + calibrated<br/>image and pixel thresholds"]
+        M --> CC["train_category_classifier.py<br/>ResNet18, 15-way"]
+        M --> DC["train_defect_classifier.py<br/>defect-type classifier<br/>(ConvNeXt / DenseNet / pill ensemble)"]
+        M -.-> BL["train_baseline.py<br/>supervised good/defective<br/>(reference, not in demo)"]
+    end
+
+    subgraph ONLINE["Online: Streamlit demo via InspectionPipeline"]
+        U["Uploaded image"] --> C1["Category classifier"]
+        C1 -->|"confidence below 0.60"| MAN["Ask user to pick a category"]
+        C1 -->|"confidence 0.60 or above"| R["Route to that category's config"]
+        MAN --> R
+        R --> FG["Optional Otsu foreground mask<br/>(per-category use_foreground_mask)"]
+        FG --> P["PatchCore: nearest-neighbour patch distances"]
+        P --> S["Image score = max patch score"]
+        P --> H["Anomaly map (28x28 grid, upsampled)"]
+        S -->|"vs. image threshold"| V{"Normal or Defective?"}
+        H -->|"vs. pixel threshold"| SEV["Severity Low / Medium / High<br/>+ heatmap overlay"]
+        V -->|Defective| DT["Defect-type classifier<br/>(optional crop of the predicted region)"]
+        V -->|Normal| OUT["Verdict, score, heatmap"]
+        SEV --> OUT
+        DT --> OUT
+    end
+
+    PC -.->|memory bank + thresholds| P
+    CC -.->|checkpoint| C1
+    DC -.->|checkpoint| DT
+```
+
+The supervised good/defective classifier and the classifier+PatchCore [hybrid ensemble](#hybrid-ensemble-fusing-the-classifier-and-patchcore) are evaluated offline only; the demo uses PatchCore for the Normal/Defective decision. The defect-type step is skipped (with a hint) when a category has no trained checkpoint, as for `toothbrush`, which has no defect subtypes.
+
 ## Getting Started (New Clone Setup)
 
 These steps take a fresh clone from zero to a running Streamlit demo. **Note:** the raw MVTec-AD dataset, trained model checkpoints (`models/checkpoints/`) and generated outputs (`outputs/`) are all excluded via `.gitignore` (too large for git) — only source code and the small `data/manifests/*.csv` files are tracked, so you need to download the dataset and (re)train the models yourself after cloning.
@@ -79,8 +129,8 @@ This project combines multiple pattern recognition / machine learning aspects, a
   - Unsupervised (reconstruction-based alternative): [src/models/autoencoder.py](src/models/autoencoder.py) — a convolutional autoencoder trained from scratch on the same `train/good` images to reconstruct normal parts; the per-pixel reconstruction error is the anomaly heatmap. Evaluated with the identical protocol via [src/models/run_autoencoder.py](src/models/run_autoencoder.py) and compared against PatchCore in [Unsupervised Comparison: Autoencoder vs PatchCore](#unsupervised-comparison-autoencoder-vs-patchcore-transistor).
 
 - **Machine learning / deep learning techniques**
-  - ImageNet-pretrained deep backbones: ResNet18, EfficientNet-B0, and ConvNeXt-Tiny CNNs plus ViT-B/16, used for supervised fine-tuning comparisons; ResNet18/WideResNet50-2 are also used as frozen PatchCore feature extractors.
-  - Classical ML techniques layered on top of deep features: greedy k-center coreset subsampling and nearest-neighbor distance scoring for anomaly detection ([src/models/anomaly_detector.py](src/models/anomaly_detector.py)), random/PCA dimensionality reduction for coreset selection, a PCA + Linear Discriminant Analysis classifier on frozen CNN embeddings as an alternative per-category defect-type classifier ([src/models/train_pca_lda_defect_classifier.py](src/models/train_pca_lda_defect_classifier.py), see [Classical ML alternative](#classical-ml-alternative-pca--lda-defect-type-classifier) below), plus standard evaluation metrics (accuracy/precision/recall/F1, ROC-AUC, IoU, Dice) in [src/evaluation/metrics.py](src/evaluation/metrics.py).
+  - ImageNet-pretrained deep backbones: ResNet18, EfficientNet-B0, DenseNet121, and ConvNeXt-Tiny CNNs plus ViT-B/16, used for supervised fine-tuning comparisons; ResNet18/WideResNet50-2 are also used as frozen PatchCore feature extractors.
+  - Classical ML techniques layered on top of deep features: greedy k-center coreset subsampling and nearest-neighbor distance scoring for anomaly detection ([src/models/anomaly_detector.py](src/models/anomaly_detector.py)), random/PCA dimensionality reduction for coreset selection, a PCA + Linear Discriminant Analysis classifier on frozen CNN embeddings as an alternative per-category defect-type classifier ([src/models/train_pca_lda_defect_classifier.py](src/models/train_pca_lda_defect_classifier.py), see [Classical ML alternative](#machine-learning-alternatives-pca--lda-defect-type-classifier) below), plus standard evaluation metrics (accuracy/precision/recall/F1, ROC-AUC, IoU, Dice) in [src/evaluation/metrics.py](src/evaluation/metrics.py).
 
 - **Hybrid machine learning / ensemble approach**
   - The pipeline combines a deep feature extractor (CNN) with a classical nearest-neighbor memory bank (PatchCore), i.e. deep representation learning + non-parametric matching, rather than a purely end-to-end network.
@@ -225,8 +275,8 @@ python -m src.models.train_category_classifier --categories screw bottle hazelnu
 
 **What it does:** since MVTec's `train/` only has `good` images, this baseline instead carves a train/val split out of the *labeled* `test/` rows (`data.val_split` / `data.seed` in the config, e.g. 70/30 for screw) and trains a plain good-vs-defective image classifier on it.
 
-**Algorithm:** one of five interchangeable architectures (`model.architecture` in the config):
-- `resnet18` or `efficientnet_b0` — ImageNet-pretrained CNN backbone (transfer learning) with the final layer replaced by a 2-way linear head.
+**Algorithm:** one of six interchangeable architectures (`model.architecture` in the config):
+- `resnet18`, `efficientnet_b0` or `densenet121` — ImageNet-pretrained CNN backbone (transfer learning) with the final layer replaced by a 2-way linear head.
 - `convnext_tiny` — an ImageNet-pretrained modern convolutional architecture that adopts design ideas popularized by vision transformers while retaining convolutional inductive biases.
 - `vit_b_16` — an ImageNet-pretrained Vision Transformer that splits the 224×224 image into 16×16 patches and classifies from self-attention features.
 - `simple_cnn` — a small 4-block Conv→BatchNorm→ReLU→MaxPool CNN ([SimpleCNN](src/models/baseline_classifier.py)) trained from scratch (no pretrained weights), used as a from-scratch comparison point.
@@ -242,7 +292,7 @@ For a less split-sensitive estimate, add `--cross-validation --folds 5`. This ru
 - `outputs/metrics/baseline_<architecture>_<category>_cv<folds>_metrics.json` — fold-level metrics, mean ± standard deviation, and aggregate out-of-fold metrics when cross-validation is requested.
 - `outputs/figures/baseline_<architecture>_<category>_cv<folds>_confusion_matrix.png` — confusion matrix from all out-of-fold predictions.
 
-**Classical ML alternative:** [src/models/train_pca_lda_baseline_classifier.py](src/models/train_pca_lda_baseline_classifier.py) targets the same problem/split with frozen ResNet18 embeddings → PCA → LDA instead of a fine-tuned CNN head — see [Classical ML alternative: PCA + LDA baseline classifier](#classical-ml-alternative-pca--lda-baseline-classifier) for when it does/doesn't beat the CNN classifier. Not currently wired into the Streamlit demo (which still uses the Step 2 CNN checkpoint via PatchCore/ensemble).
+**Classical ML alternative:** [src/models/train_pca_lda_baseline_classifier.py](src/models/train_pca_lda_baseline_classifier.py) targets the same problem/split with frozen ResNet18 embeddings → PCA → LDA instead of a fine-tuned CNN head — see [Classical ML alternative: PCA + LDA baseline classifier](#classical-machine-learning-alternatives-pca--lda-on-frozen-resnet18-embeddings-baseline-classifier) for when it does/doesn't beat the CNN classifier. Not currently wired into the Streamlit demo (which still uses the Step 2 CNN checkpoint via PatchCore/ensemble).
 
 ### Step 3 — Train the category classifier (auto-detect object type)
 
@@ -293,7 +343,7 @@ Experimental overrides append identifiers instead of overwriting the default art
 1. **Train only on `train/good`:** the autoencoder learns to reconstruct normal products. Inputs are raw `[0, 1]` RGB pixels (no ImageNet normalization, since the network must output the image itself) at 224×224, without rotation/flip augmentation (transistor's `misplaced` defect *is* a rotated/missing part). Architecture follows the MVTec-AD reference autoencoder: five stride-2 conv blocks (224 → 7) and a 7×7 conv squeeze the image into a **1×1×`latent_dim` bottleneck** (default 128), mirrored by a transposed-conv decoder with a sigmoid output (6.7M parameters). The narrow bottleneck is deliberate — a wide one can learn an identity map and reconstruct the defect too. Trained from scratch with Adam for `autoencoder.epochs` (200) on either MSE (`loss: l2`) or 1 − SSIM (`loss: ssim`, Gaussian-window SSIM implemented in pure PyTorch).
 2. **Anomaly map:** per-pixel reconstruction error between input `x` and reconstruction `x̂` — squared error averaged over RGB (`l2`) or 1 − SSIM (`ssim`) — Gaussian-smoothed with σ = `error_blur_sigma` (4) to suppress single-pixel noise. A defective region is reconstructed as "what a normal part should look like", so it differs from the input.
 3. **Image score:** `score_reduction` of the map — `mean` (default), `max`, or `topk` (mean of the worst 1% of pixels). AUROC for all three reductions is always reported (`auroc_by_score_reduction`); the configured one drives the thresholded predictions.
-4. **Thresholding/evaluation:** identical to Step 3 (normal-only calibration → frozen thresholds → one pass over the full test set).
+4. **Thresholding/evaluation:** identical to Step 4 (normal-only calibration → frozen thresholds → one pass over the full test set).
 
 **Output** (named `autoencoder_conv_<loss>_<category>`, plus `_ld<latent_dim>` when `--latent-dim` overrides the config):
 - `models/checkpoints/autoencoder_conv_<loss>_<category>.pt` — weights + architecture settings + both frozen thresholds.
@@ -329,7 +379,7 @@ This is optional per category — the Streamlit demo checks whether a checkpoint
 
 **What it does, end to end, for an uploaded image:**
 1. Runs the Step 4 category classifier to auto-detect the object type (`screw`/`bottle`/`hazelnut`/`carpet`/`leather`/`wood`/`grid`/`tile`/`transistor`), with a collapsed manual-override dropdown as a fallback.
-2. Loads that category's config, PatchCore memory bank (Step 3 checkpoint) and metrics file (for the separate image-decision and pixel-localization thresholds).
+2. Loads that category's config, PatchCore memory bank (Step 4 checkpoint) and metrics file (for the separate image-decision and pixel-localization thresholds).
 3. Computes the Otsu foreground mask (`compute_foreground_mask`) unless the category's config sets `use_foreground_mask: false` (full-frame textures like `bottle`/`carpet`/`leather`/`wood`/`grid`/`tile`, or a discrete object on a busy non-uniform background like `transistor`).
 4. Runs `PatchCoreAnomalyDetector.predict` to get the image anomaly score and pixel-level anomaly map.
 5. Turns the score into a **Normal / Defective** verdict by comparing against the stored image-level threshold (calibration-percentile by default, Youden's J for configs that don't opt into calibration).
@@ -347,7 +397,7 @@ This is optional per category — the Streamlit demo checks whether a checkpoint
 
 **Command:** `python -m pytest tests/ -v`
 
-**What's tested:** pure evaluation/preprocessing/visualization functions plus baseline-training control flow; no trained checkpoints are required —
+**What's tested:** pure evaluation/preprocessing/visualization functions, baseline-training control flow, and inspection-pipeline logic exercised with fake detectors; no trained checkpoints are required —
 - [tests/test_metrics.py](tests/test_metrics.py): `compute_classification_metrics`, `youden_threshold`, `percentile_threshold`, `compute_iou`/`compute_dice`, `compute_pixel_level_metrics` against hand-built synthetic labels/scores/masks.
 - [tests/test_heatmap.py](tests/test_heatmap.py): `normalize_map`/`normalize_map_threshold`/`make_overlay` produce correctly-shaped, correctly-ranged outputs.
 - [tests/test_segmentation.py](tests/test_segmentation.py): `compute_foreground_mask` correctly separates a synthetic bright object from a dark background (and vice versa).
@@ -360,6 +410,14 @@ This is optional per category — the Streamlit demo checks whether a checkpoint
 - [tests/test_patchcore_scoring_summary.py](tests/test_patchcore_scoring_summary.py): scoring experiments are scoped to the correct baseline, ranked, and compared with metric deltas.
 - [tests/test_anomaly_fusion.py](tests/test_anomaly_fusion.py): calibration normalizers (z-score / min-max, no clipping, constant/empty rejection) and the weighted-average fusion rule with α endpoints selecting a single detector.
 - [tests/test_autoencoder.py](tests/test_autoencoder.py): an untrained `ConvAutoencoder` preserves input shape with `[0, 1]` output, SSIM of identical images is 1, L2/SSIM error maps are zero for perfect reconstructions and peak at a corrupted region, mean/max/top-k score reductions, the raw-pixel autoencoder transform, and per-defect-type detection rates/AUROC.
+
+- [tests/test_transforms.py](tests/test_transforms.py): PatchCore translation augmentation preserves tensor shape, and the supervised train transforms contain no random rotation.
+- [tests/test_app_confidence.py](tests/test_app_confidence.py): category-classifier confidence below the 0.60 threshold blocks automatic inspection, while the threshold itself and higher values allow it.
+- [tests/test_inspection_pipeline.py](tests/test_inspection_pipeline.py): `InspectionPipeline` with fake detectors — pixel-threshold-driven localization visuals, low-confidence blocking and manual-category override, screw routed to the high-resolution config, per-category defect-classifier architecture override, equal-soft-vote ensemble loading, and removal of disconnected noise by `keep_primary_anomaly_region`.
+- [tests/test_defect_classifier_benchmark.py](tests/test_defect_classifier_benchmark.py): the defect-type manifest builder rejects a category with only one defect label (toothbrush).
+- [tests/test_defect_classifier_cv.py](tests/test_defect_classifier_cv.py): paired repeated-CV counts and the four-model voting strategies.
+- [tests/test_defect_classifier_deployment_config.py](tests/test_defect_classifier_deployment_config.py): category-specific model choices (ConvNeXt-Tiny default, DenseNet121 for cable), pill's equal-soft-vote ensemble, and screw's preserved focused-crop setting.
+- [tests/test_kernel_classifiers.py](tests/test_kernel_classifiers.py): the RBF, GRNN and SOM classifiers fit and return probabilities / distance scores on small synthetic data.
 
 **Output:** pytest pass/fail report in the terminal; no files are written.
 
@@ -616,14 +674,15 @@ The earlier 9-category run (bottle, carpet, grid, hazelnut, leather, screw, tile
 
 Same memory bank size (2000 patches), same coreset/foreground-masking settings — only the frozen feature-extractor backbone changes (`config/screw_config_wide_resnet50_2.yaml`).
 
-**Caveat:** the ResNet18 row uses the current `screw_config.yaml`, which has normal-only calibration enabled (memory bank fit on 256/320 `train/good` images, thresholds calibrated on the other 64); `screw_config_wide_resnet50_2.yaml` was not part of the calibration rework and still fits on all 320 images with a Youden's-J-on-test threshold. The two rows are therefore no longer a clean single-factor (backbone-only) comparison — treat this table as a directional backbone comparison, not a controlled ablation, until `screw_config_wide_resnet50_2.yaml` is also updated to calibration.
+**Protocol note:** `screw_config_wide_resnet50_2.yaml` has no `calibration:` block, so by default it still fits on all 320 `train/good` images and picks a Youden's-J-on-test threshold (the "legacy" row below). The "calibrated" rows use the same normal-only calibration as the current `screw_config.yaml` (memory bank fit on 256/320 `train/good` images, thresholds calibrated on the other 64); the WideResNet50-2 calibrated run corresponds to `patchcore_wide_resnet50_2_screw_metrics.json` (`threshold_method: calibration_percentile`, seed 42) and is reproduced with `--calibration`. Only the calibrated pair is a clean single-factor (backbone-only) comparison.
 
-| Backbone | Image ROC-AUC | Pixel ROC-AUC | Mean IoU | Mean Dice |
-|---|---|---|---|---|
-| ResNet18 | 0.899 | 0.886 | 0.036 | 0.069 |
-| WideResNet50-2 | **0.935** | **0.978** | 0.044 | 0.083 |
+| Backbone / protocol | Image ROC-AUC | Pixel ROC-AUC | Mean IoU | Mean Dice | Accuracy / F1 |
+|---|---|---|---|---|---|
+| ResNet18, calibrated | 0.899 | 0.886 | 0.036 | 0.069 | 0.769 / 0.823 |
+| WideResNet50-2, calibrated | 0.917 | 0.883 | 0.034 | 0.064 | 0.800 / 0.851 |
+| WideResNet50-2, legacy (all 320 images, Youden's J on test) | 0.935 | 0.978 | 0.044 | 0.083 | — |
 
-**Finding:** the larger WideResNet50-2 backbone gives richer patch features, improving image-level ROC-AUC by ~3.6 points (0.899 → 0.935) and pixel-level ROC-AUC by ~9.2 points (0.886 → 0.978), at the cost of a much larger download/forward pass (~264MB vs ~45MB, noticeably slower per image on CPU). Part of this gap may come from the calibration mismatch noted in the caveat above (for reference, the pre-calibration ResNet18 run in the tuning sweep below scored 0.909 image / 0.976 pixel ROC-AUC, so the pixel-level gain in particular is likely inflated by the recalibration rather than the backbone alone). Mean IoU/Dice barely improve (0.036 → 0.044 / 0.069 → 0.083, both still very low) — both backbones extract features at the same 28×28 spatial grid, so the blur from bilinear upsampling (the actual limiting factor for tight segmentation, per the lesson below) is unaffected by backbone size. **Recommendation:** use WideResNet50-2 when detection accuracy matters more than latency/footprint (e.g. batch QA review); keep ResNet18 for fast/interactive use (e.g. the Streamlit demo).
+**Finding:** under matched calibration the larger WideResNet50-2 backbone gives only a modest image-level gain (0.899 → 0.917 ROC-AUC, +1.8 points; accuracy 0.769 → 0.800, F1 0.823 → 0.851) and **no pixel-level or overlap gain** (pixel AUROC 0.886 → 0.883, IoU 0.036 → 0.034, Dice 0.069 → 0.064), at the cost of a much larger download/forward pass (~264MB vs ~45MB; fit 37 s and 33 ms/image on Apple MPS). The legacy row's apparent 9-point pixel-AUROC jump (0.886 → 0.978) is therefore not a backbone effect: the pre-calibration ResNet18 run in the tuning sweep below already scored 0.909 image / 0.976 pixel ROC-AUC, so the legacy WideResNet50-2 figures are only +0.2 points on pixel AUROC (0.976 → 0.978) and +2.6 points on image AUROC (0.909 → 0.935) over the like-for-like legacy ResNet18 baseline. IoU/Dice stay very low for both — both backbones extract features at the same 28×28 spatial grid, so the blur from bilinear upsampling (the limiting factor for tight segmentation) is unaffected by backbone size. **Recommendation:** keep ResNet18 as the default (the demo and all 15 categories use it); WideResNet50-2 is not justified by the matched comparison on screw, and any larger-backbone claim should be tested per category with multiple seeds.
 
 ### PatchCore parameter tuning: coreset size, projection dimension, and feature layers
 
@@ -665,7 +724,7 @@ python -m src.evaluation.summarize_patchcore_tuning --category screw
 
 **Finding:** reducing the memory bank or using only the deeper, coarser `layer3` features loses substantial information. A larger bank preserves more normal variation, a wider random projection preserves coreset-selection distances better, and `layer2` retains the finer spatial/detail signal most useful for screw defects. The combined setting improves every reported metric across three seeds, but costs roughly twice the memory-bank storage and nearest-neighbor scoring work versus 2,000 patches; fitting also becomes slower. Keep [config/screw_config.yaml](config/screw_config.yaml) as the lightweight cross-category baseline and use [config/screw_config_tuned_patchcore.yaml](config/screw_config_tuned_patchcore.yaml) when screw accuracy matters more than latency. These values were tuned on screw and must not be copied to other categories without category-specific, multi-seed validation.
 
-**Finding — finer localization trades ranking quality for overlap.** The 320px `layer1+layer2` run in [config/screw_config_highres_patchcore.yaml](config/screw_config_highres_patchcore.yaml) increases the feature grid from 28×28 to 80×80. It improves mean IoU from `0.0471` to `0.0580`, mean Dice from `0.0884` to `0.1076`, and image AUROC from `0.9092` to `0.9434`, but pixel AUROC falls from `0.9761` to `0.8830`. On `manipulated_front/000`, the maximum response moves inside the ground-truth defect and IoU improves from `0.031` to `0.050`. A 448px attempt exceeded practical fitting memory because the original implementation retained every dense patch; the high-resolution config therefore caps the pre-coreset candidate pool at 100,000 before selecting the 2,000-patch memory bank. The Streamlit screw route uses this model for its better overlap, but the heatmap remains approximate rather than pixel-exact.
+**Finding — finer localization trades ranking quality for overlap.** The 320px `layer1+layer2` run in [config/screw_config_highres_patchcore.yaml](config/screw_config_highres_patchcore.yaml) increases the feature grid from 28×28 to 80×80. It improves mean IoU from `0.0471` to `0.0580`, mean Dice from `0.0884` to `0.1076`, and image AUROC from `0.9092` to `0.9434`, but pixel AUROC falls from `0.9761` to `0.8830`. On `manipulated_front/000`, the maximum response moves inside the ground-truth defect and IoU improves from `0.031` to `0.050`. A 448px attempt exceeded practical fitting memory because the original implementation retained every dense patch; the high-resolution config therefore caps the pre-coreset candidate pool at 100,000 before selecting the 2,000-patch memory bank. The Streamlit screw route uses this model for its better overlap, but the heatmap remains approximate rather than pixel-exact. **Protocol caveat:** [config/screw_config_highres_patchcore.yaml](config/screw_config_highres_patchcore.yaml) has no `calibration:` block, so the deployed screw route uses Youden's-J-on-test thresholds, unlike the other 14 categories (which use normal-only calibration); the screw figures in this paragraph are therefore on the legacy protocol and are not comparable to the calibrated 0.899 / 0.886 headline.
 
 **Finding — high-resolution variants fail on transistor.** [config/transistor_config_highres_patchcore.yaml](config/transistor_config_highres_patchcore.yaml) applies the screw model's 320px `layer1+layer2` feature grid, while [config/transistor_config_highres_layer2_layer3.yaml](config/transistor_config_highres_layer2_layer3.yaml) isolates resolution by retaining the baseline's deeper `layer2+layer3` features. Both keep transistor's 2,000-patch memory bank and disabled foreground mask, and both underperform the deployed 224px model on every aggregate metric, so the Streamlit transistor route remains unchanged:
 
@@ -693,7 +752,7 @@ python -m src.models.run_anomaly_detection --config config/screw_config.yaml \
 python -m src.evaluation.summarize_patchcore_scoring --category screw
 ```
 
-Same ResNet18/default coreset and seed 42; only scoring changes. Values show baseline → k=3, followed by the 9-support softmax image AUROC (softmax cannot change pixel metrics):
+Same ResNet18/default coreset and seed 42; only scoring changes. **Protocol note:** all runs in this section predate the [threshold calibration rework](#threshold-calibration-normal-only-vs-labelled) (memory bank fit on all `train/good` images, threshold from Youden's J on the test set), so the baselines (e.g. screw 0.9092 image AUROC) differ from the calibrated 0.899 used elsewhere; they are valid as within-section comparisons only, and re-running the commands above with today's configs applies calibration and will give different absolute numbers. Values show baseline → k=3, followed by the 9-support softmax image AUROC (softmax cannot change pixel metrics):
 
 | Category | Image AUROC | Pixel AUROC | Mean IoU | Mean Dice | Softmax image AUROC |
 |---|---:|---:|---:|---:|---:|
@@ -744,7 +803,7 @@ python -m src.evaluation.summarize_projection_benchmark \
 
 The summary is written to `outputs/metrics/patchcore_resnet18_pcaproj_multiseed_summary.json`. Each category reports mean ± sample standard deviation across PCA seeds and the delta from its existing default random-projection run (seed 42).
 
-Same backbone (ResNet18), memory bank size (2000 patches), projection dimension (128), and per-category foreground-masking settings — only the coreset's internal projection/seed changes. PCA values are mean ± sample standard deviation over seeds 41/42/43; the random baseline is the existing seed-42 run:
+Same backbone (ResNet18), memory bank size (2000 patches), projection dimension (128), and per-category foreground-masking settings — only the coreset's internal projection/seed changes. **Protocol note:** these runs also predate the calibration rework (legacy Youden's-J-on-test thresholds), so the random-projection baselines (e.g. screw 0.9092) are not the calibrated headline numbers. PCA values are mean ± sample standard deviation over seeds 41/42/43; the random baseline is the existing seed-42 run:
 
 | Category | Random image AUROC | PCA image AUROC | Δ | Random pixel AUROC | PCA pixel AUROC | Δ |
 |---|---:|---:|---:|---:|---:|---:|
@@ -760,7 +819,7 @@ Same backbone (ResNet18), memory bank size (2000 patches), projection dimension 
 
 Both detectors answer the same unsupervised question — *"does this image look like the normal training images?"* — but learn "normal" in very different ways. Transistor was used as the case study because its four defect types range from a gross structural change (`misplaced`: transistor missing or rotated, ~42% of the image in the ground-truth mask) to tiny local defects (`bent_lead`/`cut_lead`, ~1.6%; `damaged_case`, ~2.8%).
 
-| | PatchCore ([Step 3](#step-3--train-and-evaluate-the-unsupervised-patchcore-anomaly-detector)) | Convolutional autoencoder ([Step 3b](#step-3b-optional--train-and-evaluate-the-convolutional-autoencoder-alternative-unsupervised-detector)) |
+| | PatchCore ([Step 4](#step-4--train-and-evaluate-the-unsupervised-patchcore-anomaly-detector)) | Convolutional autoencoder ([Step 4b](#step-4b-optional--train-and-evaluate-the-convolutional-autoencoder-alternative-unsupervised-detector)) |
 |---|---|---|
 | What models "normal" | Memory bank of 2,000 patch features from a frozen ImageNet-pretrained ResNet18 | Network weights (6.7M) trained from scratch to reconstruct normal images through a 128-d bottleneck |
 | Training | No gradient training — feature extraction + greedy coreset | 200 epochs of Adam on reconstruction loss (MSE or SSIM) |
@@ -861,7 +920,7 @@ python -m src.models.run_patchcore_autoencoder_ensemble --config config/transist
 python -m src.models.run_ensemble --config config/screw_config.yaml --classifier-weight 0.5
 ```
 
-**Important methodological note:** this is evaluated only on the classifier's held-out validation subset (48 images) — the *only* data the classifier hasn't been fit on. PatchCore, by contrast, has never seen *any* test-set image during training, so it's evaluated fairly on all 160 test images elsewhere in this README; on this smaller 48-image slice alone it scores a lower 0.884 AUROC (accuracy 0.79) than its full-test-set 0.909, simply due to the smaller/different sample.
+**Important methodological note:** this is evaluated only on the classifier's held-out validation subset (48 images) — the *only* data the classifier hasn't been fit on. PatchCore, by contrast, has never seen *any* test-set image during training, so it's evaluated fairly on all 160 test images elsewhere in this README; on this smaller 48-image slice alone it scores a lower 0.884 AUROC (accuracy 0.79) than its full-test-set 0.909 (pre-calibration; 0.899 with the current calibrated config), simply due to the smaller/different sample.
 
 | Signal | AUROC (on the 48-image held-out subset) | Accuracy |
 |---|---|---|
@@ -917,28 +976,42 @@ These PatchCore numbers use normal-only threshold calibration (see [Threshold Ca
 
 **Finding — the classifier's "perfect scores" issue isn't universal.** Unlike screw and hazelnut, the bottle classifier scored a believable 0.88 accuracy / 0.92 F1, not 1.0 (its held-out val subset is smaller — only 25 images — and the defects are more subtle). This is a useful counter-example confirming that the earlier "misleadingly perfect" finding is specifically a symptom of the *screw* dataset being small/easy, not a bug in the evaluation code.
 
-**Finding — the foreground-masking heuristic doesn't generalize automatically, and blindly applying it can actively hurt localization.** The Otsu-based foreground mask ([src/preprocessing/segmentation.py](src/preprocessing/segmentation.py)) assumes a plain background with the object as the minority of pixels — true for screw and hazelnut, but **false for bottle**, whose images are a top-down shot where the bottle mouth fills the entire frame. Applying it anyway made bottle's pixel-level ROC-AUC **worse than random (0.374)**: Otsu split the frame into the dark inner bottle opening vs. the lighter rim, and incorrectly zeroed out real defect pixels that happened to fall inside the dark "background" region. Adding a `use_foreground_mask: false` toggle to `bottle_config.yaml` (and threading it through [run_anomaly_detection.py](src/models/run_anomaly_detection.py) and the Streamlit app) fixed it immediately: pixel ROC-AUC jumped to 0.981 and mean IoU/Dice became the *best* of screw/bottle/hazelnut (0.40 / 0.55) — confirmed visually, the predicted heatmap now matches the crescent-shaped ground-truth defect almost exactly. **Lesson:** any hand-crafted heuristic derived from one category's visual layout should be treated as a per-category, config-driven option, not a hardcoded assumption — and always sanity-check pixel-level metrics per category rather than assuming an improvement that helped one category will help (or even be neutral for) another.
+**Finding — the foreground-masking heuristic doesn't generalize automatically, and blindly applying it can actively hurt localization.** The Otsu-based foreground mask ([src/preprocessing/segmentation.py](src/preprocessing/segmentation.py)) assumes a plain background with the object as the minority of pixels — true for screw and hazelnut, but **false for bottle**, whose images are a top-down shot where the bottle mouth fills the entire frame. Applying it anyway made bottle's pixel-level ROC-AUC **worse than random (0.374)**: Otsu split the frame into the dark inner bottle opening vs. the lighter rim, and incorrectly zeroed out real defect pixels that happened to fall inside the dark "background" region. Adding a `use_foreground_mask: false` toggle to `bottle_config.yaml` (and threading it through [run_anomaly_detection.py](src/models/run_anomaly_detection.py) and the Streamlit app) fixed it immediately: pixel ROC-AUC jumped to 0.981 and mean IoU/Dice became the *best* of screw/bottle/hazelnut (0.204 / 0.327 under today's calibrated thresholds, versus 0.036 / 0.069 and 0.149 / 0.238; 0.40 / 0.55 in the original pre-calibration run) — confirmed visually, the predicted heatmap now matches the crescent-shaped ground-truth defect almost exactly. **Lesson:** any hand-crafted heuristic derived from one category's visual layout should be treated as a per-category, config-driven option, not a hardcoded assumption — and always sanity-check pixel-level metrics per category rather than assuming an improvement that helped one category will help (or even be neutral for) another.
 
 **Applying the lesson upfront — `carpet` and `leather`.** Both are full-frame textures just like `bottle` (no discrete object vs. background), so their configs were created with `use_foreground_mask: false` from the start instead of discovering the problem the hard way again. Result: carpet got the best pixel-level ROC-AUC of the first four categories (0.987), and leather pushed that further to **0.991** — the best across the five-category run — on the first run each time, concrete evidence that the earlier fix generalized into a repeatable, config-driven decision rather than a one-off patch. Leather's mean IoU/Dice (0.127 / 0.210) are lower than carpet's, though — a reminder that pixel ROC-AUC (ranking) and IoU/Dice (tight overlap) are still independent axes even within the same `use_foreground_mask: false` texture group (see the IoU/Dice lesson below).
 
 **Scaling to eight categories — `wood`, `grid`, and `tile`.** Adding three more texture-based categories pushed the analysis to eight total. Grid (a regular geometric pattern) shows weaker performance overall (0.784 image AUROC, 0.83 classifier accuracy) — likely due to the regular repeating pattern making subtle defect anomalies harder to distinguish from normal pattern variations. Tile (a repeating tile texture) performs strongly, nearly matching leather's performance (0.997 image AUROC, 0.94 classifier accuracy) with the best mean IoU/Dice (0.383 / 0.518) among all eight categories, suggesting its defects are spatially localized and visually distinct. Wood (wood grain texture) achieves perfect classifier accuracy (1.00) and strong PatchCore image AUROC (0.989), but lower pixel-level AUROC (0.930) and IoU/Dice, indicating good image-level anomaly detection but less precise pixel localization — likely because wood grain itself has high natural texture variation. All three new categories maintained the eight-category category classifier's 100% validation accuracy, confirming that the object types remain visually distinct even as the dataset scales.
 
-**A new twist — `transistor` is a discrete object but still needs masking disabled.** Unlike carpet/leather, `transistor` *does* have a clear discrete object (a small transistor package with metal leads) sitting on a minority of the frame — the same layout as screw/hazelnut, where the Otsu mask helps. But its background is a perforated copper board (alternating light copper strips and dark mounting holes), not a plain surface, so Otsu's plain-background assumption still doesn't hold: the dark holes score similarly to the dark transistor body, and would get pulled into the "foreground" alongside it. `transistor_config.yaml` was created with `use_foreground_mask: false` for this reason, and the result is the **best PatchCore image ROC-AUC of any category so far (0.998, tied with hazelnut)** with a solidly mid-pack pixel ROC-AUC (0.961) and IoU/Dice (0.248 / 0.351) — in the same range as bottle/hazelnut/carpet, not the worst-case seen with bottle's original broken masking. **Lesson:** the foreground-mask decision isn't just "discrete object vs. full-frame texture" — it's really "is the background plain/uniform", and a discrete-object category can still need masking disabled if its background is visually busy.
+**A new twist — `transistor` is a discrete object but still needs masking disabled.** Unlike carpet/leather, `transistor` *does* have a clear discrete object (a small transistor package with metal leads) sitting on a minority of the frame — the same layout as screw/hazelnut, where the Otsu mask helps. But its background is a perforated copper board (alternating light copper strips and dark mounting holes), not a plain surface, so Otsu's plain-background assumption still doesn't hold: the dark holes score similarly to the dark transistor body, and would get pulled into the "foreground" alongside it. `transistor_config.yaml` was created with `use_foreground_mask: false` for this reason, and the result is a high PatchCore image ROC-AUC (**0.990** calibrated; 0.998 in the earlier pre-calibration run) with a solid pixel ROC-AUC (0.967) and the highest mean IoU/Dice of the first nine categories (0.315 / 0.455, using the `keep_primary_region` postprocessing described below; the earlier raw, pre-calibration map scored 0.248 / 0.351) — not the worst-case seen with bottle's original broken masking. **Lesson:** the foreground-mask decision isn't just "discrete object vs. full-frame texture" — it's really "is the background plain/uniform", and a discrete-object category can still need masking disabled if its background is visually busy.
 
 **Transistor localization postprocessing.** Because the busy board creates disconnected false positives and weak bridges into border responses, `keep_primary_region: true` with `primary_region_peak_fraction: 0.30` grows the displayed region from the map's strongest response at a boundary 30% of the way from the calibrated pixel threshold to that image's peak. This postprocessor drives localization, severity, and optional defect crops; the raw PatchCore scores still define image AUROC (`0.9975`) and pixel AUROC (`0.9608`). On the full defective test set, increasing the fraction from `0.10` to `0.30` improves mean IoU from `0.3116` to `0.3210` and mean Dice from `0.4461` to `0.4628`. On `bent_lead/001.png`, the broad board response shrinks from `6,807` to `2,181` predicted pixels, raising IoU/Dice from `0.0172`/`0.0338` to `0.0536`/`0.1018` while retaining all ground-truth defect pixels. The tighter boundary lowers mean defect-pixel recall from `85.5%` to `67.1%`, especially for `cut_lead` and `misplaced`, so this is a precision-oriented display tradeoff rather than a pixel-exact segmentation claim. (These specific numbers are from the pre-calibration memory bank fit on all 213 `train/good` images; the `primary_region_peak_fraction` sweep itself was not re-run after adding normal-only calibration, so its absolute AUROC/IoU/Dice values are slightly stale — see [Threshold Calibration](#threshold-calibration-normal-only-vs-labelled) below for the current numbers.)
 
 **Completing all fifteen categories — `cable`, `capsule`, `metal_nut`, `pill`, `toothbrush`, `zipper`.** PatchCore memory banks (`models/checkpoints/patchcore_resnet18_<category>_memory_bank.pt`) were built for the six remaining MVTec-AD categories with the same default recipe as the other categories (ResNet18 layer2+3, 2,000-patch coreset, 80/20 normal-only calibration, 95th-percentile thresholds, one scoring of the full test set; no per-category tuning). `use_foreground_mask` was decided up front, label-free, by inspecting Otsu masks on `train/good` images: only `pill` (plain white background, clean hole-free mask) enables it; `cable` (ragged mask dropping dark insulation), `capsule` (the black half of the capsule is classified as background), `metal_nut` (holes inside the shiny object), `toothbrush` (holes at the bristle tufts where defects occur) and `zipper` (full-frame texture) keep it off. No good/defective classifier baseline or autoencoder was trained for these six. Defect-type classification results are included below where the category has multiple defect labels.
 
+**Full 15-category PatchCore evaluation at the calibrated threshold.** The table below covers all fifteen categories (the first nine were previously reported only as AUROC/IoU/Dice above). Every row is the default `<category>_config.yaml` recipe, scored once on the full MVTec `test/` split with normal-only 95th-percentile thresholds; values come straight from `outputs/metrics/patchcore_resnet18_<category>_metrics.json`. "Missed defects / false alarms" is defective images predicted normal (out of all defective) · good images flagged defective (out of all good).
+
 | Category | Accuracy | Precision | Recall | F1 | Image ROC-AUC | Pixel ROC-AUC | Missed defects / false alarms |
 |---|---|---|---|---|---|---|---|
+| Screw | 0.769 | 0.956 | 0.723 | 0.823 | 0.899 | 0.886 | 33/119 · 4/41 |
+| Bottle | 0.952 | 0.940 | 1.000 | 0.969 | 1.000 | 0.981 | 0/63 · 4/20 |
+| Hazelnut | 0.991 | 1.000 | 0.986 | 0.993 | 1.000 | 0.858 | 1/70 · 0/40 |
+| Carpet | 0.932 | 0.955 | 0.955 | 0.955 | 0.973 | 0.987 | 4/89 · 4/28 |
+| Leather | 0.944 | 0.929 | 1.000 | 0.963 | 1.000 | 0.991 | 0/92 · 7/32 |
+| Wood | 0.911 | 0.896 | 1.000 | 0.945 | 0.996 | 0.931 | 0/60 · 7/19 |
+| Grid | 0.782 | 0.955 | 0.737 | 0.832 | 0.934 | 0.954 | 15/57 · 2/21 |
+| Tile | 0.974 | 0.976 | 0.988 | 0.982 | 0.998 | 0.939 | 1/84 · 2/33 |
+| Transistor | 0.890 | 0.784 | 1.000 | 0.879 | 0.990 | 0.967 | 0/40 · 11/60 |
 | Cable | 0.907 | 0.915 | 0.935 | 0.925 | 0.988 | 0.981 | 6/92 · 8/58 |
 | Capsule | 0.848 | 0.968 | 0.844 | 0.902 | 0.935 | 0.983 | 17/109 · 3/23 |
 | Metal nut | 0.965 | 0.978 | 0.978 | 0.978 | 0.991 | 0.979 | 2/93 · 2/22 |
 | Pill | 0.743 | 0.990 | 0.702 | 0.822 | 0.901 | 0.958 | 42/141 · 1/26 |
 | Toothbrush | 0.905 | 0.933 | 0.933 | 0.933 | 0.956 | 0.989 | 2/30 · 2/12 |
 | Zipper | 0.967 | 0.975 | 0.983 | 0.979 | 0.963 | 0.985 | 2/119 · 3/32 |
+| **Mean (15 categories)** | **0.899** | **0.943** | **0.918** | **0.925** | **0.968** | **0.958** | — |
 
-**Finding — `pill` is the weakest of the new categories, and its calibrated threshold is too strict.** Image AUROC is only 0.901 and, even though precision is 0.990, the 95th-percentile threshold from 53 held-out normals misses 42 of 141 defective images (recall 0.702), the opposite failure of transistor's false-alarm-heavy threshold. Capsule shows the same pattern in milder form (recall 0.844, image AUROC 0.935), and has the lowest mean IoU (0.049) despite a high pixel AUROC (0.983), because its defects are tiny. Pixel AUROC is ≥ 0.958 for all six, i.e. the heatmaps rank defect pixels well even where the image-level threshold/score is weak. Pill was run only with the foreground mask on (decided before seeing results); whether disabling it would help was **not** tested, since choosing between the two on the test set would reintroduce test-set tuning. **Demo routing:** the category classifier (already a 15-way model, 100% validation accuracy) was routing these images correctly, but the inspection pipeline's routing table ([src/inference/inspection_pipeline.py](src/inference/inspection_pipeline.py)) only listed nine categories, so uploads detected as one of the six failed with "Unsupported category". The six are now registered, and a smoke test on one good and one defective test image per category detected the right category at 100% confidence and ran PatchCore inspection (the demo shows the "no defect-type classifier trained yet" note for them, since only PatchCore was built). [tests/test_inspection_routing.py](tests/test_inspection_routing.py) checks that every routable category has a config and that every category the classifier can predict is routable.
+**Finding — across all 15 categories, the calibrated threshold, not the ranking, is the main source of error.** Nine categories reach F1 ≥ 0.93, but screw (0.823), grid (0.832), pill (0.822) and capsule (0.902) lose most of their score to recall (0.723 / 0.737 / 0.702 / 0.844) while keeping precision ≥ 0.955; their image AUROC (0.899 / 0.934 / 0.901 / 0.935) is also the lowest in the set. The opposite failure appears on the textures and transistor: leather (7/32), wood (7/19) and transistor (11/60) catch every defect (recall 1.000) but raise many false alarms. Hazelnut has the best operating point (accuracy 0.991, 1 miss, 0 false alarms) yet the lowest pixel AUROC of the set (0.858), another case where image-level and pixel-level quality move independently.
+
+**Finding — `pill` is the weakest of the six newest categories, and its calibrated threshold is too strict.** Image AUROC is only 0.901 and, even though precision is 0.990, the 95th-percentile threshold from 53 held-out normals misses 42 of 141 defective images (recall 0.702), the opposite failure of transistor's false-alarm-heavy threshold. Capsule shows the same pattern in milder form (recall 0.844, image AUROC 0.935), and has the lowest mean IoU (0.049) despite a high pixel AUROC (0.983), because its defects are tiny. Pixel AUROC is ≥ 0.958 for all six, i.e. the heatmaps rank defect pixels well even where the image-level threshold/score is weak. Pill was run only with the foreground mask on (decided before seeing results); whether disabling it would help was **not** tested, since choosing between the two on the test set would reintroduce test-set tuning. **Demo routing:** the category classifier (already a 15-way model, 100% validation accuracy) was routing these images correctly, but the inspection pipeline's routing table ([src/inference/inspection_pipeline.py](src/inference/inspection_pipeline.py)) only listed nine categories, so uploads detected as one of the six failed with "Unsupported category". The six are now registered, and a smoke test on one good and one defective test image per category detected the right category at 100% confidence and ran PatchCore inspection (the demo shows the "no defect-type classifier trained yet" note for them, since only PatchCore was built). [tests/test_inspection_routing.py](tests/test_inspection_routing.py) checks that every routable category has a config and that every category the classifier can predict is routable.
 
 The Streamlit demo ([app/streamlit_app.py](app/streamlit_app.py)) doesn't require the user to pick a category: [src/models/train_category_classifier.py](src/models/train_category_classifier.py) trains a ResNet18 classifier to recognize the object type, and the app routes the upload to that category's PatchCore detector automatically. A collapsed "override" dropdown provides a manual fallback. Adding a category requires a `config/<category>_config.yaml` entry in `CATEGORY_CONFIGS` and retraining the category classifier with it included. A combined run across all 15 MVTec-AD categories (`--categories` default: screw, bottle, hazelnut, carpet, leather, wood, grid, tile, transistor, cable, capsule, metal_nut, pill, toothbrush, zipper) reached **100% validation accuracy** (5354 images total, 3629 train / 1725 val, perfect confusion matrix across every class), confirming the "which object type is this?" task stays trivially separable even as the label set nearly doubles.
 
@@ -1260,3 +1333,39 @@ The deployment-matched crop improves screw by **13.89 accuracy points** on the i
 - **Reassess crop-based defect typing with independent threshold calibration.** The screw PatchCore-crop experiment improved over its seeded full-image rerun, but inherited a pixel threshold selected from labeled test data. Calibrate the crop-generating detector on separate data and evaluate defect typing on untouched images before treating this as an independent performance estimate.
 
 - **Improve false-alarm calibration where precision is important.** Normal-only percentile calibration is coarse with the available holdout sizes. Determine whether larger normal calibration sets or a separately collected, representative calibration set can deliver the required false-alarm rate without using final-test labels.
+
+## Limitations & Future Work
+
+The methodological caveats are detailed in [Notes & Lessons Learned §3](#3-open-questions-follow-up-checks-and-limitations); this section summarizes what limits the current system and what would be done next.
+
+**Current limitations**
+- **Single capture setup.** Every metric comes from MVTec-AD's fixed lighting, backgrounds and cameras. PatchCore scores distance from a normal memory bank, so an unfamiliar photo of the right object can score as "defective" (domain shift, not a defect); the numbers here do not speak to that case.
+- **Threshold trade-offs are uneven across categories.** The 95th-percentile normal-only threshold misses many defects on `screw`, `grid`, `pill` and `capsule` (recall 0.70–0.84) and raises many false alarms on `leather`, `wood` and `transistor` (7/32, 7/19 and 11/60). Labelled calibration, which could balance these, is not implemented.
+- **Coarse localization.** The 28×28 feature grid gives high pixel AUROC (mean 0.958) but low thresholded overlap (mean IoU/Dice 0.151 / 0.235); heatmaps are an estimated response, not pixel-exact segmentation.
+- **Uneven coverage across the 15 categories.** The supervised good/defective baseline, the autoencoder and its ensemble, the RBF/GRNN/SOM comparison (8 categories, no transistor or the six newest), the k-NN/softmax and PCA-projection ablations, and PCA+LDA baselines cover only subsets of categories. `toothbrush` has no defect subtypes, so it has no defect-type classifier.
+- **Defect typing rests on small, test-derived validation sets.** One image moves accuracy by several points, and the final category-routed model was selected after seeing the same splits, so its 0.913 mean accuracy is optimistic.
+- **Ensembles are not deployed.** The classifier+PatchCore and PatchCore+autoencoder fusions are offline experiments; the Streamlit demo uses PatchCore alone for the Normal/Defective decision (the defect-type step does use an ensemble for `pill`).
+
+**Future work**
+- Validate on independent, production-like images, and add an out-of-distribution check so the demo can distinguish "defective" from "unfamiliar".
+- Calibrate thresholds per category on a larger or labelled calibration set, with defective images held out of the final evaluation.
+- Re-run the k-NN/softmax and projection ablations, and the WideResNet50-2 comparison, under the calibrated protocol on all 15 categories with multiple seeds.
+- Evaluate the PatchCore+autoencoder and classifier+PatchCore fusions beyond transistor, choosing α on labelled validation data before considering them for the demo.
+- Run a fixed-update-budget augmentation control and repeated or nested cross-validation for every defect-type category.
+
+## References
+
+1. K. Roth, L. Pemula, J. Zepeda, B. Schölkopf, T. Brox, P. Gehler. *Towards Total Recall in Industrial Anomaly Detection* (PatchCore). CVPR 2022. [arXiv:2106.08265](https://arxiv.org/abs/2106.08265)
+2. P. Bergmann, M. Fauser, D. Sattlegger, C. Steger. *MVTec AD — A Comprehensive Real-World Dataset for Unsupervised Anomaly Detection.* CVPR 2019, pp. 9592–9600.
+3. P. Bergmann, K. Batzner, M. Fauser, D. Sattlegger, C. Steger. *The MVTec Anomaly Detection Dataset: A Comprehensive Real-World Dataset for Unsupervised Anomaly Detection.* International Journal of Computer Vision 129, 1038–1059 (2021). Dataset licensed CC BY-NC-SA 4.0 (see `data/mvtec_anomaly_detection/license.txt`).
+4. K. He, X. Zhang, S. Ren, J. Sun. *Deep Residual Learning for Image Recognition* (ResNet18). CVPR 2016.
+5. S. Zagoruyko, N. Komodakis. *Wide Residual Networks* (WideResNet50-2). BMVC 2016.
+6. G. Huang, Z. Liu, L. van der Maaten, K. Q. Weinberger. *Densely Connected Convolutional Networks* (DenseNet121). CVPR 2017.
+7. M. Tan, Q. V. Le. *EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks.* ICML 2019.
+8. Z. Liu, H. Mao, C.-Y. Wu, C. Feichtenhofer, T. Darrell, S. Xie. *A ConvNet for the 2020s* (ConvNeXt). CVPR 2022.
+9. A. Dosovitskiy et al. *An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale* (ViT). ICLR 2021.
+10. O. Sener, S. Savarese. *Active Learning for Convolutional Neural Networks: A Core-Set Approach* (greedy k-center coreset). ICLR 2018.
+11. Z. Wang, A. C. Bovik, H. R. Sheikh, E. P. Simoncelli. *Image Quality Assessment: From Error Visibility to Structural Similarity* (SSIM). IEEE Transactions on Image Processing 13(4), 2004.
+12. D. F. Specht. *A General Regression Neural Network* (GRNN). IEEE Transactions on Neural Networks 2(6), 1991.
+13. T. Kohonen. *Self-organized formation of topologically correct feature maps* (SOM). Biological Cybernetics 43, 1982.
+14. A. Paszke et al. *PyTorch: An Imperative Style, High-Performance Deep Learning Library.* NeurIPS 2019; torchvision pretrained ImageNet weights.
