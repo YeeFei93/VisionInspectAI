@@ -53,7 +53,30 @@ The supervised good/defective classifier and the classifier+PatchCore [hybrid en
 
 ## Getting Started (New Clone Setup)
 
-These steps take a fresh clone from zero to a running Streamlit demo. **Note:** the raw MVTec-AD dataset, trained model checkpoints (`models/checkpoints/`) and generated outputs (`outputs/`) are all excluded via `.gitignore` (too large for git) — only source code and the small `data/manifests/*.csv` files are tracked, so you need to download the dataset and (re)train the models yourself after cloning.
+These steps take a fresh clone from zero to a running Streamlit demo. **Note:** the raw MVTec-AD dataset, trained model checkpoints (`models/checkpoints/`) and generated outputs (`outputs/`) are all excluded via `.gitignore` (too large for git) — only source code and the small `data/manifests/*.csv` files are tracked.
+
+### Fastest path — run the demo without training
+
+The demo does not need the dataset, only the trained artifacts used at inference time (category classifier, 15 PatchCore memory banks, defect-type classifiers and their threshold/metrics JSONs): **66 files, ~1.66 GB**, mostly the ConvNeXt-Tiny defect classifiers at ~111 MB each. They are published as zip assets on a [GitHub Release](https://github.com/YeeFei93/VisionInspectAI/releases) (tag `models-v1`) rather than in git: individual checkpoints exceed git's 100 MB file limit, and the total exceeds the free Git LFS quota (1 GB).
+
+```bash
+git clone https://github.com/YeeFei93/VisionInspectAI
+cd VisionInspectAI
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python scripts/download_models.py     # downloads + extracts into models/checkpoints/ and outputs/metrics/
+streamlit run app/streamlit_app.py
+```
+
+**Maintainer — publishing the artifacts** (re-run after retraining):
+
+```bash
+python scripts/package_models.py      # traces which files the app really opens -> dist/models/visioninspect-models-*of*.zip
+gh release create models-v1 dist/models/*.zip --title "Pre-trained demo models" --notes "Artifacts for streamlit run app/streamlit_app.py"
+```
+
+`package_models.py` splits the archive into parts under 1.5 GB (GitHub's limit is 2 GiB per release asset); `download_models.py` fetches and extracts all parts. To train from scratch instead, follow the steps below.
+
 
 ### 1. Clone and set up a Python environment
 
@@ -64,7 +87,7 @@ cd VisionInspectAI
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
 Requires Python 3.9+.
