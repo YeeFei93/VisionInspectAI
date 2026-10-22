@@ -15,6 +15,8 @@ Caveat: MVTec provides no ground truth for which specific types make up a
 not something with a directly computable accuracy number.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
 
