@@ -20,7 +20,7 @@ This project is the practice module project for the NUS-ISS Graduate Certificate
 ## Build, Test, Run
 
 ```bash
-pip install -r requirement.txt        # note: filename is "requirement.txt", not "requirements.txt"
+pip install -r requirements.txt
 python -m src.data.create_manifest --category <cat>
 python -m src.models.train_baseline --config config/<cat>_config.yaml
 python -m src.models.run_anomaly_detection --config config/<cat>_config.yaml
