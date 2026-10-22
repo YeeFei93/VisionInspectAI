@@ -68,6 +68,8 @@ python scripts/download_models.py     # downloads + extracts into models/checkpo
 streamlit run app/streamlit_app.py
 ```
 
+For test images, download samples from [MVTec-AD](https://www.mvtec.com/research-teaching/datasets/mvtec-ad) or its [Kaggle mirror](https://www.kaggle.com/datasets/ipythonx/mvtec-ad) (the `test/` folders have both normal and defective examples), or generate similar images with an AI image generator. The app shows this hint on its upload screen too.
+
 **Maintainer — publishing the artifacts** (re-run after retraining):
 
 ```bash

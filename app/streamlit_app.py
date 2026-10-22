@@ -78,6 +78,13 @@ def main() -> None:
             "Upload a .png / .jpg image of one of the supported categories: "
             f"{', '.join(sorted(known_categories))}."
         )
+        st.markdown(
+            "**Need test images?** Download sample images from the "
+            "[MVTec-AD dataset](https://www.mvtec.com/research-teaching/datasets/mvtec-ad) "
+            "or its [Kaggle mirror](https://www.kaggle.com/datasets/ipythonx/mvtec-ad) "
+            "(use the `test/` folders for both normal and defective examples), "
+            "or generate similar images with an AI image generator."
+        )
         return
 
     original_image = load_as_rgb(uploaded_file)
