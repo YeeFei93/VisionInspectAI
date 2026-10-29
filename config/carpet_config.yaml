@@ -44,3 +44,19 @@ output:
   metrics_dir: outputs/metrics
   figures_dir: outputs/figures
   heatmaps_dir: outputs/heatmaps
+
+# Reconstruction-based unsupervised detector, used for the cross-category
+# PatchCore + autoencoder ensemble check (README "Unsupervised Ensemble").
+# Same hyperparameters as transistor_config.yaml so every category follows an
+# identical protocol (nothing tuned per category).
+autoencoder:
+  latent_dim: 128
+  base_channels: 32
+  loss: l2                 # l2 (MSE) or ssim; also the per-pixel error metric
+  epochs: 200
+  learning_rate: 0.0002
+  weight_decay: 0.00001
+  batch_size: 16
+  score_reduction: mean    # mean, max, or topk (all three AUROCs are reported)
+  topk_fraction: 0.01
+  error_blur_sigma: 4.0

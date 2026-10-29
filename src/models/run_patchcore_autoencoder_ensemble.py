@@ -176,7 +176,7 @@ def main() -> None:
     config = load_config(args.config)
     category = config.get("category", "transistor")
     data_cfg, anomaly_cfg, ae_cfg, output_cfg = (
-        config["data"], config["anomaly_detection"], config["autoencoder"], config["output"],
+        config["data"], config["anomaly_detection"], config.get("autoencoder", {}), config["output"],
     )
     image_size = data_cfg["image_size"]
     seed = anomaly_cfg.get("seed", data_cfg["seed"])
@@ -252,6 +252,12 @@ def main() -> None:
         },
         "patchcore": evaluate(*pc, *eval_args),
         "ensembles": {},
+        # Per-image test scores, kept so paired bootstrap CIs can be computed offline.
+        "test_scores": {
+            "labels": labels.tolist(),
+            "defect_types": defect_types,
+            "patchcore": pc[2].tolist(),
+        },
     }
 
     ae_transform = get_autoencoder_transforms(image_size)
@@ -286,6 +292,8 @@ def main() -> None:
         ae_norm = normalize_detector(*ae, args.normalization)
         fused = fuse_detectors(pc_norm, ae_norm, args.alpha)
         entry["ensemble"] = evaluate(*fused, *eval_args)
+        results["test_scores"][f"autoencoder_{loss}"] = np.asarray(ae[2]).tolist()
+        results["test_scores"][f"ensemble_{loss}"] = np.asarray(fused[2]).tolist()
 
         if not args.no_sweep:
             sweep = {}
