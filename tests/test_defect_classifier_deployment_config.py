@@ -12,7 +12,7 @@ def load_classifier(category):
 
 
 def test_category_specific_single_model_choices():
-    assert load_classifier("cable")["architecture"] == "densenet121"
+    assert load_classifier("cable")["architecture"] == "efficientnet_b0"
     for category in ("bottle", "capsule", "metal_nut", "wood", "zipper"):
         assert load_classifier(category)["architecture"] == "convnext_tiny"
 

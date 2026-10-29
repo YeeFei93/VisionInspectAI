@@ -12,7 +12,7 @@ model:
   num_classes: 2
 
 defect_classifier:
-  architecture: densenet121
+  architecture: efficientnet_b0
   use_focused_crops: false
 
 train:
