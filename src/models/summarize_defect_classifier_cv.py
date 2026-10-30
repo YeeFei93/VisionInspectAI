@@ -90,7 +90,7 @@ def summarise_category(folds):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=Path("outputs/metrics/defect_classifier_cv"))
-    parser.add_argument("--categories", nargs="+", default=["bottle", "cable", "pill"])
+    parser.add_argument("--categories", nargs="+", default=["bottle", "cable", "capsule", "pill"])
     args = parser.parse_args()
     input_dir = PROJECT_ROOT / args.input_dir
 
