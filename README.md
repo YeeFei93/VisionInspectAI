@@ -72,6 +72,7 @@ Your browser opens the VisionInspectAI page (if it doesn't, open the address sho
 ### Step 4: Inspect an image
 
 1. Click **Upload an image** and choose a `.png`, `.jpg` or `.jpeg` photo of one of the supported products: `bottle`, `cable`, `capsule`, `carpet`, `grid`, `hazelnut`, `leather`, `metal_nut`, `pill`, `screw`, `tile`, `toothbrush`, `transistor`, `wood` or `zipper`.
+   - **Need test images?** The app is trained on the MVTec AD dataset, so use the `test/` folders of [MVTec AD](https://www.mvtec.com/research-teaching/datasets/mvtec-ad) or its [Kaggle mirror](https://www.kaggle.com/datasets/ipythonx/mvtec-ad), which contain both normal and defective examples, or generate similar images with an AI image generator.
 2. The product type is detected automatically. If it is wrong, open **Override automatic category detection** and pick the category yourself.
 3. Read the result:
 
@@ -90,7 +91,6 @@ Your browser opens the VisionInspectAI page (if it doesn't, open the address sho
 - If the category confidence is below 60%, no prediction is shown; try another image or choose the category manually. Between 60% and 70% a warning asks you to double-check the category.
 - Photos that differ a lot from the training images (different background, lighting or camera, or a product that isn't one of the 15 above) can give unreliable results.
 - The highlighted region is an approximation of where the defect is, not a pixel-exact outline.
-- **Need test images?** Use the `test/` folders of [MVTec AD](https://www.mvtec.com/research-teaching/datasets/mvtec-ad) or its [Kaggle mirror](https://www.kaggle.com/datasets/ipythonx/mvtec-ad), which contain both normal and defective examples, or generate similar images with an AI image generator.
 
 ---
 
@@ -121,3 +121,4 @@ Your browser opens the VisionInspectAI page (if it doesn't, open the address sho
 
 - VisionInspectAI.png
 - video-thumbnail.png
+- VisionInspectAI_finalpresentation_slide.pptx
