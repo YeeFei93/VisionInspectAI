@@ -32,6 +32,8 @@ These results hold within MVTec's controlled capture conditions and need indepen
 
 [![VisionInspectAI Demo](Miscellaneous/video-thumbnail.png)](https://www.youtube.com/watch?v=cVghZcQc1hc "VisionInspectAI")
 
+> **Note:** if the video looks blurry, click the gear icon in the YouTube player, choose **Quality**, then select **1080p**.
+
 ---
 
 ## SECTION 5 : USER GUIDE
