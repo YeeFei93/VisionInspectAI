@@ -194,8 +194,8 @@ def main() -> None:
             )
         else:
             st.caption(
-                f"No defect-type classifier trained for **{category}** yet — run "
-                f"`python -m src.models.train_defect_classifier --config config/{category}_config.yaml` to enable this."
+                f"No defect-type classifier trained for **{result.category}** yet — run "
+                f"`python -m src.models.train_defect_classifier --config config/{result.category}_config.yaml` to enable this."
             )
 
         if len(result.distinct_defect_regions) > 1:
