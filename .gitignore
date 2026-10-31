@@ -7,22 +7,23 @@ venv/
 .env
 
 # Data (raw MVTec-AD dataset is not tracked; small generated manifests are)
-/data/*
-!/data/manifests/
-!/data/manifests/**
+/SystemCode/data/*
+!/SystemCode/data/manifests/
+!/SystemCode/data/manifests/**
 *.zip
+/Video/*.mp4
 *.tar.xz
 *.tar.gz
 
 # Model artifacts
-models/checkpoints/
+/SystemCode/models/checkpoints/
 *.pth
 *.pt
 *.ckpt
 
 # Outputs
 outputs/
-/dist/
+/SystemCode/dist/
 runs/
 mlruns/
 
